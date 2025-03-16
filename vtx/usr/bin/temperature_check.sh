@@ -33,8 +33,13 @@ while true; do
         echo "Adapter 88XXau temperature extraction not implemented yet."
         adapter_temp=0
     elif [ "$wifi_adapter" = "8812eu" ]; then
-        echo "Adapter 8812eu temperature extraction not implemented yet."
-        adapter_temp=0
+        # Extract both temperature values from the thermal_state file and choose the highest one.
+        if [ -f /proc/net/rtl88x2eu/wlan0/thermal_state ]; then
+            adapter_temp=$(grep -o 'temperature: [0-9]*' /proc/net/rtl88x2eu/wlan0/thermal_state | awk '{print $2}' | sort -n | tail -1)
+        else
+            echo "Thermal state file for 8812eu not found."
+            adapter_temp=0
+        fi
     else
         echo "Unknown adapter type: $wifi_adapter"
     fi
@@ -107,12 +112,11 @@ while true; do
         elif [ "$current_state" -eq 4 ]; then
             # Throttle Level 2 commands only if moving upward (old_state < new_state)
             if [ "$current_state" -gt "$old_state" ]; then
-            	echo "Severe throttling VTX (level 2). Video will stop in 10sec, return to home..VTX Temp:&T WifiTemp:&W" > /tmp/msposd.msg
-            	sleep 10
+                echo "Severe throttling VTX (level 2). Video will stop in 10sec, return to home..VTX Temp:&T WifiTemp:&W" > /tmp/msposd.msg
+                sleep 10
                 /etc/init.d/S95majestic stop
             fi
             
-        
         elif [ "$current_state" -eq 5 ]; then
             echo "VTX will reboot due to thermal state...VTX Temp:&T WifiTemp:&W. Rebooting in 5 seconds..."
             sleep 5
