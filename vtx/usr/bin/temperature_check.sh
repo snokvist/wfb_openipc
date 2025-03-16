@@ -46,12 +46,13 @@ while true; do
 
     # --- Determine the current state based on max_temp ---
     if [ "$max_temp" -lt "$NORMAL_THRESHOLD" ]; then
-        echo "Normal: VTX Temp"
+        echo "Normal: VTX Temp: $max_temp"
     elif [ "$max_temp" -lt "$REBOOT_THRESHOLD" ]; then
         echo "Warning: High temperature was detected.\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F18" > /tmp/MSPOSD.msg
-        echo "High: VTX Temp"
+        echo "High: VTX Temp: $max_temp"
     else
         echo "VTX will reboot due to thermal state...VTX Temp:&T WifiTemp:&W &L30 &G8 &F18.\nRebooting in 15 seconds..." > /tmp/MSPOSD.msg
+        echo "Reboot: VTX Temp: $max_temp"
         sleep 15
         reboot
     fi
