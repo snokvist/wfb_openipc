@@ -1,8 +1,8 @@
 #!/bin/sh
 
 # Configuration parameters (adjust these as needed)
-INPUT_MIN=950
-INPUT_MAX=2050
+INPUT_MIN=1000
+INPUT_MAX=2000
 OUTPUT_MIN=2800
 OUTPUT_MAX=18000
 
