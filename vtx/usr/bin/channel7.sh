@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 echo "Running logic on msposd channel 7"
 
