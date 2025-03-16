@@ -1,7 +1,7 @@
 #!/bin/sh
 # Define temperature thresholds:
-NORMAL_THRESHOLD=90    # Normal if below 80°C
-REBOOT_THRESHOLD=105   # Reboot if 100°C or higher
+NORMAL_THRESHOLD=85    # Normal if below 80°C
+REBOOT_THRESHOLD=100   # Reboot if 100°C or higher
 
 while true; do
     # --- Get VTX Temperature ---
