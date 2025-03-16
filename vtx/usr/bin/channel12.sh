@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # Configuration parameters (adjust these as needed)
 INPUT_MIN=950
