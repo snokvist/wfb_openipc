@@ -12,7 +12,7 @@ import time
 CONFIG_FILE = "/etc/wifibroadcast.cfg"
 DEFAULTS_FILE = "/usr/sbin/wfb-ng.sh"         # file holding default values to update/restore
 CHANGE_CMD_FILE = "/usr/sbin/wfb-ng-change.sh"   # command to run on nodes
-SSH_TIMEOUT = 5         # general SSH timeout in seconds
+SSH_TIMEOUT = 6         # general SSH timeout in seconds
 
 # Dedicated constants for killswitch in --sync-vtx mode
 KILLSWITCH_DELAY = 8   # seconds to wait before attempting to kill killswitch
