@@ -17,10 +17,6 @@ current_state=0
 # Record the timestamp when the current state started
 state_start_time=$(date +%s)
 
-# Variables to track a pending state change.
-pending_state=""
-pending_state_start_time=""
-
 while true; do
     # --- Get VTX Temperature ---
     # Example output from ipcinfo --temp: "39.00"
@@ -76,100 +72,75 @@ while true; do
         new_state=5
     fi
 
-    # --- Enforce recovery rule ---
-    # If we've reached a high state (>=3) before, then ignore intermediate warning states.
-    # Only allow a lower state if it's 0.
-    if [ "$current_state" -ge 3 ] && [ "$new_state" -lt "$current_state" ] && [ "$new_state" -ne 0 ]; then
-        new_state=$current_state
-    fi
-
-    # --- Check for state change with a persistence requirement ---
+    # --- Check for state change and take actions accordingly ---
     if [ "$new_state" -ne "$current_state" ]; then
-        # If the pending state is not set or is different than the new state,
-        # start the pending state timer.
-        if [ -z "$pending_state" ] || [ "$pending_state" -ne "$new_state" ]; then
-            pending_state=$new_state
-            pending_state_start_time=$(date +%s)
-        else
-            # If the pending state is already the new state, check if it persisted >16 seconds.
-            elapsed_pending=$(($(date +%s) - pending_state_start_time))
-            if [ "$elapsed_pending" -ge 16 ]; then
-                # Accept the new state change
-                old_state=$current_state
-                current_state=$new_state
-                state_start_time=$(date +%s)
-                # Clear pending state
-                pending_state=""
-                pending_state_start_time=""
-                
-                # Take actions based on the new state:
-                if [ "$current_state" -eq 0 ]; then
-                    # Recovery: only run if coming from a throttling state (3 or 4)
-                    if [ "$old_state" -eq 3 ] || [ "$old_state" -eq 4 ]; then
-                        echo "Recovered from throttling state. Running recovery commands..."
-                        /etc/init.d/S95majestic stop
-                        wifibroadcast stop
-                        wifibroadcast start
-                        /etc/init.d/S95majestic start
-                    fi
-                    echo "Normal: VTX Temp:&T WifiTemp:&W &L30 &G8 &F16"
-                    
-                elif [ "$current_state" -eq 1 ]; then
-                    echo "Warning: High temperature detected.\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16" > /tmp/MSPOSD.msg
-                    
-                elif [ "$current_state" -eq 2 ]; then
-                    echo "Warning: High temperature detected.\nVTX will soon thermal throttle...\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16" > /tmp/MSPOSD.msg
-                    
-                elif [ "$current_state" -eq 3 ]; then
-                    # Throttle Level 1 commands only if moving upward
-                    if [ "$current_state" -gt "$old_state" ]; then
-                        if [ "$wifi_adapter" = "88XXau" ]; then
-                            txpower_value="-500"
-                        else
-                            txpower_value="500"
-                        fi
-                        iw dev wlan0 set txpower fixed $txpower_value
-                        echo setfps 0 30 > /proc/mi_modules/mi_sensor/mi_sensor0
-                    fi
-                    echo "Throttling VTX (level 1).\nReboot imminent, return to home...\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16" > /tmp/MSPOSD.msg
-                    
-                elif [ "$current_state" -eq 4 ]; then
-                    # Throttle Level 2 commands only if moving upward
-                    if [ "$current_state" -gt "$old_state" ]; then
-                        echo "Severe throttling VTX (level 2).\nVideo will stop in 10sec, return to home...\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16" > /tmp/MSPOSD.msg
-                        sleep 10
-                        /etc/init.d/S95majestic stop
-                    fi
-                    
-                elif [ "$current_state" -eq 5 ]; then
-                    echo "VTX will reboot due to thermal state...\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16. Rebooting in 5 seconds..."
-                    sleep 5
-                    reboot
-                fi
-            fi
-        fi
-    else
-        # New state is the same as current_state; clear any pending change.
-        pending_state=""
-        pending_state_start_time=""
+        # Save previous state before updating
+        old_state=$current_state
+        current_state=$new_state
+        state_start_time=$(date +%s)
         
-        # Update the message with elapsed time.
+        if [ "$current_state" -eq 0 ]; then
+            # Recovery: only run if coming from a throttling state (3 or 4)
+            if [ "$old_state" -eq 3 ] || [ "$old_state" -eq 4 ]; then
+                echo "Recovered from throttling state. Running recovery commands..."
+                /etc/init.d/S95majestic stop
+                wifibroadcast stop
+                wifibroadcast start
+                /etc/init.d/S95majestic start
+            fi
+            echo "Normal: VTX Temp:&T WifiTemp:&W &L30 &G8 &F16"
+        
+        elif [ "$current_state" -eq 1 ]; then
+            echo "Warning: High temperature detected.\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16" > /tmp/MSPOSD.msg
+        
+        elif [ "$current_state" -eq 2 ]; then
+            echo "Warning: High temperature detected.\nVTX will soon thermal throttle...\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16" > /tmp/MSPOSD.msg
+        
+        elif [ "$current_state" -eq 3 ]; then
+            # Throttle Level 1 commands only if moving upward (old_state < new_state)
+            if [ "$current_state" -gt "$old_state" ]; then
+                if [ "$wifi_adapter" = "88XXau" ]; then
+                    txpower_value="-500"
+                else
+                    txpower_value="500"
+                fi
+                iw dev wlan0 set txpower fixed $txpower_value
+                echo setfps 0 30 > /proc/mi_modules/mi_sensor/mi_sensor0
+            fi
+            echo "Throttling VTX (level 1).\nReboot imminent, return to home...\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16" > /tmp/MSPOSD.msg
+        
+        elif [ "$current_state" -eq 4 ]; then
+            # Throttle Level 2 commands only if moving upward (old_state < new_state)
+            if [ "$current_state" -gt "$old_state" ]; then
+                echo "Severe throttling VTX (level 2).\nVideo will stop in 10sec, return to home...\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16" > /tmp/MSPOSD.msg
+                sleep 10
+                /etc/init.d/S95majestic stop
+            fi
+            
+        elif [ "$current_state" -eq 5 ]; then
+            echo "VTX will reboot due to thermal state...VTX Temp:&T WifiTemp:&W &L30 &G8 &F16. Rebooting in 5 seconds..."
+            sleep 5
+            reboot
+        fi
+        
+    else
+        # State remains the same; update the message with elapsed time.
         elapsed=$(($(date +%s) - state_start_time))
         case $current_state in
             0)
-                echo "Normal: VTX Temp:&T WifiTemp:&W &L30 &G8 &F16\n(State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
+                echo "Normal: VTX Temp:&T WifiTemp:&W &L30 &G8 &F16 \n(State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
                 ;;
             1)
-                echo "Warning: High temperature detected.\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16\n(State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
+                echo "Warning: High temperature detected.\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16 \n(State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
                 ;;
             2)
-                echo "Warning: High temperature detected.\nVTX will soon thermal throttle...\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16\n(State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
+                echo "Warning: High temperature detected.\nVTX will soon thermal throttle...\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16 \n(State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
                 ;;
             3)
-                echo "Throttling VTX (level 1).\nReboot imminent, return to home...\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16\n(State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
+                echo "Throttling VTX (level 1).\nReboot imminent, return to home...\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16 \n(State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
                 ;;
             4)
-                echo "Severe throttling VTX (level 2).\nReboot imminent, return to home...\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16\n(State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
+                echo "Severe throttling VTX (level 2).\nReboot imminent, return to home...\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16 \n(State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
                 ;;
             5)
                 # Reboot state should not linger.
