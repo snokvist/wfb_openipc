@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 echo "Running logic on msposd channel 5"
 
@@ -9,10 +9,10 @@ if [ "$tx_on_arm" = "enabled" ]; then
     ##TX ON ARM BEGIN
     if [ "$1" -lt 1200 ]; then
         echo "Disarm detected, setting low power"
-        set_alink_tx_pwr.sh 1
+        set_live_tx_pwr.sh 1
     elif [ "$1" -gt 1800 ]; then
         echo "ARM detected, setting high power"
-        set_alink_tx_pwr.sh 9
+        set_live_tx_pwr.sh 9
     fi
     ##TX ON ARM END
 fi
