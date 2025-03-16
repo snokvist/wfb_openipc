@@ -50,7 +50,7 @@ while true; do
     elif [ "$max_temp" -lt "$REBOOT_THRESHOLD" ]; then
         echo "Warning: High temperature detected.\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16" > /tmp/MSPOSD.msg
     else
-        echo "VTX will reboot due to thermal state...VTX Temp:&T WifiTemp:&W &L30 &G8 &F16.\nRebooting in 15 seconds..."
+        echo "VTX will reboot due to thermal state...VTX Temp:&T WifiTemp:&W &L30 &G8 &F16.\nRebooting in 15 seconds..." > /tmp/MSPOSD.msg
         sleep 15
         reboot
     fi
