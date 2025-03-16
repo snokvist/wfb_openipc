@@ -1,0 +1,54 @@
+wireless:
+  txpower: 1
+  channel: 165
+  max_bw: HT20
+  passphrase: openipc
+  wifi_profile:
+  video_profile:
+broadcast:
+  mcs_index: 3
+  bw: 20
+  fec_k: 8
+  fec_n: 12
+  link_id: 7669206
+  force_vht: false
+  keypair: drone-test.key
+  ldpc: 0
+  stbc: 0
+  mirror: false
+  guard_interval: 0
+  stream_tx: 0
+  stream_rx: null
+tunnel:
+  mcs_index: 1
+  bw: 20
+  fec_k: 1
+  fec_n: 2
+  link_id: 7669206
+  force_vht: false
+  keypair: drone-test.key
+  ldpc: 0
+  stbc: 0
+  mirror: false
+  guard_interval: 0
+  stream_tx: 0
+  stream_rx: null
+bind:
+  bind_channel: 165
+  link_id: 10531917
+  stream_tx: 255
+  stream_rx: 127
+  bandwidth: 20
+  fec_k: 1
+  fec_n: 2
+  ifaddr: 10.5.99.1/24
+  ifname: gs-bind
+  keypair: bind.key
+  ldpc: 0
+  stbc: 0
+  mcs_index: 1
+  guard_interval: 0
+telemetry:
+  router: msposd
+  serial: /dev/ttyS2
+  osd_fps: 20

@@ -1,0 +1,59 @@
+max_bw: 20
+profiles:
+  drone:
+    link_domain: default
+    link_id: 7669206
+    services:
+      tunnel:
+        cfg:
+          bandwidth: 20
+          control_port: 0
+          default_route: false
+          fec_delay: 0
+          fec_k: 1
+          fec_n: 2
+          fec_timeout: 0
+          force_vht: false
+          frame_type: rts
+          fwmark: 20
+          ifaddr: 10.5.0.10/24
+          ifname: drone-wfb
+          keypair: /etc/drone.key
+          ldpc: 1
+          mcs_index: 1
+          mirror: false
+          short_gi: false
+          stbc: 1
+          stream_rx: 160
+          stream_tx: 32
+          use_qdisc: true
+        type: tunnel
+      video:
+        cfg:
+          bandwidth: 20
+          control_port: 7103
+          fec_delay: 0
+          fec_k: 8
+          fec_n: 12
+          fec_timeout: 0
+          force_vht: false
+          frame_type: data
+          fwmark: 1
+          keypair: /etc/drone.key
+          ldpc: 1
+          mcs_index: 1
+          mirror: false
+          peer: listen://0.0.0.0:5600
+          short_gi: false
+          stbc: 1
+          stream_rx: null
+          stream_tx: 0
+          use_qdisc: true
+        type: udp_direct_tx
+telemetry:
+  router: msposd
+  serial: /dev/ttyS2
+  osd_fps: 20
+common:
+  passphrase: openipc
+wifi_channel: 161
