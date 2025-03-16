@@ -10,17 +10,20 @@ import time
 
 # --- Configuration Constants ---
 CONFIG_FILE = "/etc/wifibroadcast.cfg"
-DEFAULTS_FILE = "/usr/sbin/wfb-ng.sh"       # file holding default values to update/restore
-CHANGE_CMD_FILE = "/usr/sbin/wfb-ng-change.sh"  # command to run on nodes
-SSH_TIMEOUT = 5       # general SSH timeout in seconds
+DEFAULTS_FILE = "/usr/sbin/wfb-ng.sh"         # file holding default values to update/restore
+CHANGE_CMD_FILE = "/usr/sbin/wfb-ng-change.sh"   # command to run on nodes
+SSH_TIMEOUT = 5         # general SSH timeout in seconds
 
-# New dedicated constants for killswitch delay and timeout (now 10 sec)
-KILLSWITCH_DELAY = 8  # seconds to wait before attempting to kill killswitch
-KILLSWITCH_TIMEOUT = 3  # seconds for the killall killswitch command timeout
+# Dedicated constants for killswitch in --sync-vtx mode
+KILLSWITCH_DELAY = 5   # seconds to wait before attempting to kill killswitch
+KILLSWITCH_TIMEOUT = 5 # seconds timeout for kill command
 
-# New dedicated constants for find mode:
-VTX_FIND_DELAY = 7   # seconds to wait after setting channel in find mode
-VTX_FIND_TIMEOUT = 3  # seconds timeout for test command in find mode
+# Dedicated constants for --find-vtx mode
+VTX_FIND_DELAY = 5     # seconds to wait after setting channel in find mode
+VTX_FIND_TIMEOUT = 5    # seconds timeout for test command
+
+# Retry timeout for both test and kill commands (try twice)
+RETRY_TIMEOUT = 3       # seconds to wait before retrying a command
 
 # Approved channel combinations (easily changed here)
 APPROVED_CHANNELS = {
@@ -28,10 +31,10 @@ APPROVED_CHANNELS = {
     "HT40+": [161, 149, 140, 36]
 }
 
-# Predetermined restore settings (used if killswitch cancellation fails)
-RESTORE_CHANNEL = 165
-RESTORE_BANDWIDTH = "HT20"
-RESTORE_REGION = "00"
+# Unified fallback settings for both modes
+FALLBACK_CHANNEL = 165
+FALLBACK_BANDWIDTH = "HT20"
+FALLBACK_REGION = "US"
 
 # --- Utility Functions ---
 
@@ -187,46 +190,51 @@ def find_vtx_mode():
     Cycle through all approved channel and bandwidth combinations (using region "US")
     to find an active VTX.
     For each combination:
-      1. Send commands to local and remote nodes to change the channel.
+      1. Update only the local node with the candidate channel.
       2. Wait for VTX_FIND_DELAY seconds.
-      3. Issue a test command to VTX (10.5.0.10) with a timeout of VTX_FIND_TIMEOUT seconds.
-      4. If the test command returns the marker "VTX Found", print success and exit.
-    If no combination yields success, exit with an error message.
+      3. Issue a test SSH command to VTX (10.5.0.10) with a timeout of VTX_FIND_TIMEOUT seconds.
+          - If the test command fails, wait RETRY_TIMEOUT seconds and retry once.
+      4. If the test command returns "VTX Found", update remote nodes with this final setting and exit.
+    If no combination yields success, revert all nodes to FALLBACK settings and exit with an error.
     """
     server_address = get_server_address()
-    # We'll use the order: HT40+, then HT20
     for bandwidth in ["HT40+", "HT20"]:
         if bandwidth not in APPROVED_CHANNELS:
             continue
         for channel in APPROVED_CHANNELS[bandwidth]:
-            logging.info(f"Trying channel {channel} with bandwidth {bandwidth} on VTX...")
-            # In find mode, region is fixed to "US"
+            logging.info(f"Trying channel {channel} with bandwidth {bandwidth} (local update only)...")
             region = "US"
-            # Build command strings for local and remote nodes.
             command_local = f"{CHANGE_CMD_FILE} {channel} {bandwidth} {region}"
-            command_remote = f"{CHANGE_CMD_FILE} {channel} {bandwidth} {region} {server_address}"
-            # Change channel on local node.
             logging.info(f"Setting local node (127.0.0.1) to channel {channel}, {bandwidth}, {region}")
             run_command("127.0.0.1", command_local, is_local=True)
-            # Change channel on remote nodes.
-            ips = parse_nodes()
-            remote_ips = [ip for ip in ips if ip != "127.0.0.1"]
-            for ip in remote_ips:
-                logging.info(f"Setting remote node {ip} to channel {channel}, {bandwidth}, {region}")
-                run_command(ip, command_remote, is_local=False)
-            # Wait for the channel to establish.
             logging.info(f"Waiting for {VTX_FIND_DELAY} seconds for channel establishment...")
             time.sleep(VTX_FIND_DELAY)
-            # Issue test command to VTX.
             test_cmd = 'echo "VTX Found"; exit'
-            logging.info("Testing for VTX on 10.5.0.10...")
+            logging.info("Testing for VTX on 10.5.0.10 (first attempt)...")
             test_result = run_command("10.5.0.10", test_cmd, is_local=False, timeout=VTX_FIND_TIMEOUT)
+            if not (test_result.returncode == 0 and "VTX Found" in test_result.stdout):
+                logging.info(f"Test failed on first attempt. Waiting for {RETRY_TIMEOUT} seconds before retrying...")
+                time.sleep(RETRY_TIMEOUT)
+                logging.info("Testing for VTX on 10.5.0.10 (second attempt)...")
+                test_result = run_command("10.5.0.10", test_cmd, is_local=False, timeout=VTX_FIND_TIMEOUT)
             if test_result.returncode == 0 and "VTX Found" in test_result.stdout:
                 print(f"Found VTX on channel {channel} with bandwidth {bandwidth}.")
+                remote_ips = [ip for ip in parse_nodes() if ip != "127.0.0.1"]
+                command_remote = f"{CHANGE_CMD_FILE} {channel} {bandwidth} {region} {server_address}"
+                for ip in remote_ips:
+                    logging.info(f"Updating remote node {ip} to channel {channel}, {bandwidth}, {region}")
+                    run_command(ip, command_remote, is_local=False)
                 sys.exit(0)
             else:
                 logging.info(f"VTX not found on channel {channel} with bandwidth {bandwidth}.")
     print("No VTX found on available approved channel/bandwidth combinations.")
+    print(f"Reverting all nodes to fallback settings: {FALLBACK_CHANNEL} {FALLBACK_BANDWIDTH} {FALLBACK_REGION} ...")
+    restore_defaults(FALLBACK_CHANNEL, FALLBACK_BANDWIDTH, FALLBACK_REGION)
+    run_command("127.0.0.1", f"{CHANGE_CMD_FILE} {FALLBACK_CHANNEL} {FALLBACK_BANDWIDTH} {FALLBACK_REGION}", is_local=True)
+    remote_ips = [ip for ip in parse_nodes() if ip != "127.0.0.1"]
+    command_remote = f"{CHANGE_CMD_FILE} {FALLBACK_CHANNEL} {FALLBACK_BANDWIDTH} {FALLBACK_REGION} {server_address}"
+    for ip in remote_ips:
+        run_command(ip, command_remote, is_local=False)
     sys.exit(1)
 
 # --- Main Program ---
@@ -238,12 +246,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="Script to change the wireless channel on nodes based on /etc/wifibroadcast.cfg"
     )
-    # In find-vtx mode, the positional arguments are optional.
+    # In --find-vtx mode, the positional arguments are optional.
     parser.add_argument("channel", type=int, nargs="?", help="Channel to set")
     parser.add_argument("bandwidth", type=str, nargs="?", help="Bandwidth to set (e.g., HT20, HT40+, HT40-)")
     parser.add_argument("region", type=str, nargs="?", help="Region to set")
-    parser.add_argument("--handle-local-separately", action="store_true",
-                        help="If set, handle 127.0.0.1 with special logic")
     parser.add_argument("--sync-vtx", action="store_true",
                         help="If set, sync VTX by sending '/usr/bin/sync_channel.sh <channel> <bandwidth> <region>' to root@10.5.0.10")
     parser.add_argument("--find-vtx", action="store_true",
@@ -282,7 +288,7 @@ def main():
     logging.info(f"Local command: {command_local}")
     logging.info(f"Remote command: {command_remote}")
 
-    # Sync VTX if requested.
+    # If --sync-vtx is requested, update only the local node first.
     if args.sync_vtx:
         sync_command = (f'nohup /usr/bin/sync_channel.sh {args.channel} {args.bandwidth} {args.region} '
                         f'> /dev/null 2>&1 & echo "SYNC_STARTED"; exit')
@@ -290,101 +296,62 @@ def main():
         result = run_command("10.5.0.10", sync_command, is_local=False)
         if result.returncode != 0 or "SYNC_STARTED" not in result.stdout:
             logging.error(f"Sync VTX command failed on 10.5.0.10 with output: {result.stdout.strip()} and error: {result.stderr.strip()}")
-            logging.error("Restoring default values due to sync failure...")
-            restore_defaults(orig_channel, orig_bandwidth, orig_region)
+            logging.error("Restoring fallback settings due to sync failure...")
+            restore_defaults(FALLBACK_CHANNEL, FALLBACK_BANDWIDTH, FALLBACK_REGION)
             sys.exit(1)
         else:
             logging.info(f"Sync VTX command succeeded with output: {result.stdout.strip()}")
-
-    # Parse node IP addresses.
-    ips = parse_nodes()
-    if not ips:
-        logging.error("No nodes to process. Exiting.")
-        sys.exit(1)
-    local_ips = [ip for ip in ips if ip == "127.0.0.1"]
-    remote_ips = [ip for ip in ips if ip != "127.0.0.1"]
-
-    success = {}
-    errors = {}
-
-    # Process local nodes.
-    try:
+        logging.info("Updating local node (127.0.0.1) with channel change...")
+        run_command("127.0.0.1", command_local, is_local=True)
+    else:
+        # Normal operation: update both local and remote nodes.
+        ips = parse_nodes()
+        local_ips = [ip for ip in ips if ip == "127.0.0.1"]
+        remote_ips = [ip for ip in ips if ip != "127.0.0.1"]
+        logging.info("Updating local node(s)...")
         for ip in local_ips:
-            if args.handle_local_separately:
-                logging.info("Handling local node (127.0.0.1) with special logic.")
-            else:
-                logging.info("Handling local node (127.0.0.1) as part of the loop.")
-            result = run_command(ip, command_local, is_local=True)
-            if result.returncode == 0:
-                success[ip] = result.stdout.strip()
-                logging.info(f"Command on {ip} succeeded: {result.stdout.strip()}")
-            else:
-                errors[ip] = result.stderr.strip()
-                logging.error(f"Command on {ip} failed with error: {result.stderr.strip()}")
-    except KeyboardInterrupt:
-        logging.info("KeyboardInterrupt received. Exiting gracefully...")
-        cleanup()
-        sys.exit(1)
-
-    # Process remote nodes.
-    try:
+            run_command(ip, command_local, is_local=True)
+        logging.info("Updating remote node(s)...")
         for ip in remote_ips:
-            result = run_command(ip, command_remote, is_local=False)
-            if result.returncode == 0:
-                success[ip] = result.stdout.strip()
-                logging.info(f"Command on {ip} succeeded: {result.stdout.strip()}")
-            else:
-                errors[ip] = result.stderr.strip()
-                logging.error(f"Command on {ip} failed with error: {result.stderr.strip()}")
-    except KeyboardInterrupt:
-        logging.info("KeyboardInterrupt received. Exiting gracefully...")
-        cleanup()
-        sys.exit(1)
+            run_command(ip, command_remote, is_local=False)
 
-    # After processing nodes, if --sync-vtx is requested, wait before killing the killswitch.
+    # In --sync-vtx mode, after updating the local node, wait before killing the killswitch.
     if args.sync_vtx:
         logging.info(f"Waiting for {KILLSWITCH_DELAY} seconds to allow channel to establish...")
         time.sleep(KILLSWITCH_DELAY)
         kill_command = "killall killswitch.sh && echo 'KILLSWITCH_KILLED'; exit"
         logging.info("Killing killswitch on VTX by running command: " + kill_command)
         result_kill = run_command("10.5.0.10", kill_command, is_local=False, timeout=KILLSWITCH_TIMEOUT)
-        if result_kill.returncode != 0 or "KILLSWITCH_KILLED" not in result_kill.stdout:
-            logging.error(f"Failed to kill killswitch on VTX. Output: {result_kill.stdout.strip()} Error: {result_kill.stderr.strip()}")
-            logging.error("Restoring predetermined settings due to killswitch kill failure...")
-            restore_defaults(RESTORE_CHANNEL, RESTORE_BANDWIDTH, RESTORE_REGION)
-            local_restore_command = f"{CHANGE_CMD_FILE} {RESTORE_CHANNEL} {RESTORE_BANDWIDTH} {RESTORE_REGION} 127.0.0.1"
-            logging.info(f"Restoring settings on local node 127.0.0.1 with command: {local_restore_command}")
-            result_local_restore = run_command("127.0.0.1", local_restore_command, is_local=True)
-            if result_local_restore.returncode != 0:
-                logging.error(f"Failed to restore settings on local node 127.0.0.1: {result_local_restore.stderr.strip()}")
+        if not (result_kill.returncode == 0 and "KILLSWITCH_KILLED" in result_kill.stdout):
+            logging.error(f"Failed to kill killswitch on VTX on first attempt. Output: {result_kill.stdout.strip()} Error: {result_kill.stderr.strip()}")
+            logging.info(f"Waiting for {RETRY_TIMEOUT} seconds before retrying kill command...")
+            time.sleep(RETRY_TIMEOUT)
+            result_kill = run_command("10.5.0.10", kill_command, is_local=False, timeout=KILLSWITCH_TIMEOUT)
+            if not (result_kill.returncode == 0 and "KILLSWITCH_KILLED" in result_kill.stdout):
+                logging.error(f"Failed to kill killswitch on VTX on second attempt. Output: {result_kill.stdout.strip()} Error: {result_kill.stderr.strip()}")
+                logging.error("Restoring fallback settings due to killswitch kill failure...")
+                restore_defaults(FALLBACK_CHANNEL, FALLBACK_BANDWIDTH, FALLBACK_REGION)
+                local_restore_command = f"{CHANGE_CMD_FILE} {FALLBACK_CHANNEL} {FALLBACK_BANDWIDTH} {FALLBACK_REGION} 127.0.0.1"
+                logging.info(f"Restoring settings on local node (127.0.0.1) with command: {local_restore_command}")
+                run_command("127.0.0.1", local_restore_command, is_local=True)
+                remote_restore_command = f"{CHANGE_CMD_FILE} {FALLBACK_CHANNEL} {FALLBACK_BANDWIDTH} {FALLBACK_REGION} {server_address}"
+                remote_ips = [ip for ip in parse_nodes() if ip != "127.0.0.1"]
+                for ip in remote_ips:
+                    logging.info(f"Restoring settings on remote node {ip} with command: {remote_restore_command}")
+                    run_command(ip, remote_restore_command, is_local=False)
+                sys.exit(1)
             else:
-                logging.info(f"Settings restored on local node 127.0.0.1: {result_local_restore.stdout.strip()}")
-            remote_restore_command = f"{CHANGE_CMD_FILE} {RESTORE_CHANNEL} {RESTORE_BANDWIDTH} {RESTORE_REGION} {server_address}"
-            for ip in remote_ips:
-                logging.info(f"Restoring settings on remote node {ip} with command: {remote_restore_command}")
-                result_restore = run_command(ip, remote_restore_command, is_local=False)
-                if result_restore.returncode != 0:
-                    logging.error(f"Failed to restore settings on remote node {ip}: {result_restore.stderr.strip()}")
-                else:
-                    logging.info(f"Settings restored on remote node {ip}: {result_restore.stdout.strip()}")
-            sys.exit(1)
+                logging.info("Successfully killed killswitch on VTX on second attempt.")
         else:
-            logging.info("Successfully killed killswitch on VTX.")
+            logging.info("Successfully killed killswitch on VTX on first attempt.")
+        remote_ips = [ip for ip in parse_nodes() if ip != "127.0.0.1"]
+        logging.info("Updating remote nodes with final channel settings...")
+        for ip in remote_ips:
+            run_command(ip, command_remote, is_local=False)
 
-    # Print summary.
     print("\n=== Summary ===")
-    print("Success:")
-    if success:
-        for ip, out in success.items():
-            print(f"  {ip}: {out}")
-    else:
-        print("  None")
-    print("\nErrors:")
-    if errors:
-        for ip, err in errors.items():
-            print(f"  {ip}: {err}")
-    else:
-        print("  None")
+    print("Channel change commands have been issued.")
+    print("Check logs for details.")
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
