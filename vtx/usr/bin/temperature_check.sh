@@ -128,7 +128,7 @@ while true; do
         elapsed=$(($(date +%s) - state_start_time))
         case $current_state in
             0)
-                echo "Normal: VTX Temp:&T WifiTemp:&W &L30 &G8 &F16 (State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
+                echo "Normal: VTX Temp:&T WifiTemp:&W &L30 &G8 &F16 \n(State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
                 ;;
             1)
                 echo "Warning: High temperature detected.\nVTX Temp:&T WifiTemp:&W &L30 &G8 &F16 \n(State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
