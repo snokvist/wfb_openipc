@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Live bitrate setter with near max TX power.
 # Convert incoming argument $1 (range: 950-2050) to a new value in the range 2800-18000.
 # The linear conversion formula is:
