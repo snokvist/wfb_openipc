@@ -26,9 +26,6 @@ wfb_yaml() {
             fi
         done
 
-        # Check for broadcast redundancy setting.
-        # If .wireless.broadcast_redundancy returns "auto", then run detect_redundancy.sh.
-        # Its output should be two numbers (e.g. "8 12"). If either number is empty, default to 8 and 12.
         redundancy_val="$(yaml-cli -i "$CONFIG_FILE" -g .wireless.broadcast_redundancy 2>/dev/null)"
         if [ "$redundancy_val" = "auto" ]; then
             result="$(detect_redundancy.sh)"
@@ -132,11 +129,11 @@ start_broadcast() {
 start_tunnel() {
     echo $TUNNEL_ENABLED
     if [ "$TUNNEL_ENABLED" = "true" ]; then
-    echo "- Starting primary wfb_tun"
-    wfb_rx -p 160 -u 5800 -K "$WIRELESS_TUNNEL_KEY" -i "$WIRELESS_LINK_ID" "$wfb_dev" &> /dev/null &
-    wfb_tx -p 32 -u 5801 -K "$WIRELESS_TUNNEL_KEY" -M "$TUNNEL_MCS_INDEX" \
-        -k "$TUNNEL_FEC_K" -n "$TUNNEL_FEC_N" -i "$WIRELESS_LINK_ID" "$wfb_dev" &> /dev/null &
-    wfb_tun -a 10.5.0.10/24 > /dev/null &
+        echo "- Starting primary wfb_tun"
+        wfb_rx -p 160 -u 5800 -K "$WIRELESS_TUNNEL_KEY" -i "$WIRELESS_LINK_ID" "$wfb_dev" &> /dev/null &
+        wfb_tx -p 32 -u 5801 -K "$WIRELESS_TUNNEL_KEY" -M "$TUNNEL_MCS_INDEX" \
+            -k "$TUNNEL_FEC_K" -n "$TUNNEL_FEC_N" -i "$WIRELESS_LINK_ID" "$wfb_dev" &> /dev/null &
+        wfb_tun -a 10.5.0.10/24 > /dev/null &
     fi
     echo $ANDROID_TUNNEL_ENABLED
     if [ "$ANDROID_TUNNEL_ENABLED" = "true" ]; then
@@ -153,15 +150,24 @@ start_telemetry() {
         devmem 0x1F207890 16 0x8
     fi
     
-    
     if [ "$TELEMETRY_ROUTER" = "msposd" ]; then
         echo "- Starting $TELEMETRY_ROUTER"
         size=$(yaml-cli -i /etc/majestic.yaml -g .video0.size)
-        msposd --baudrate 115200 --channels 5 --channels 8 --channels 12 --ahi 0 -osd -r "$TELEMETRY_OSD_FPS" \
+        # Build the channels argument based on TELEMETRY_CHANNELS variable.
+        channels_arg=""
+        if [ -n "$TELEMETRY_CHANNELS" ]; then
+            oldIFS="$IFS"
+            IFS=',' 
+            for channel in $TELEMETRY_CHANNELS; do
+                channels_arg="${channels_arg} -c $channel"
+            done
+            IFS="$oldIFS"
+        fi
+        msposd --baudrate 115200 $channels_arg --ahi 0 -osd -r "$TELEMETRY_OSD_FPS" \
             --master "$TELEMETRY_SERIAL" --out 10.5.0.1:14551 --size "${size:-1280x720}" > /dev/null &
     elif [ "$TELEMETRY_ROUTER" = "mavfwd" ]; then
         echo "- Starting $TELEMETRY_ROUTER"
-        mavfwd --baudrate 115200 --channels $TELEMETRY_CHANNELS -p 100 -a 15 -t \
+        mavfwd --baudrate 115200 $channels_arg -p 100 -a 15 -t \
             --master "$TELEMETRY_SERIAL" --in 0.0.0.0:14550 --out 10.5.0.1:14551 > /dev/null &
     fi
 }
