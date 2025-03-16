@@ -25,7 +25,7 @@ if [ "$answer" != "yes" ]; then
 fi
 
 echo "Copying gs.key with passphrase \"openipc\" to /etc/"
-cp gs/gs.key /etc/gs.key
+cp gs/wfb/gs.key /etc/gs.key
 
 echo "chmod +x on relevant files ..."
 chmod -R +x vtx/usr/bin*
