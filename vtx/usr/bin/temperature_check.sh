@@ -88,13 +88,13 @@ while true; do
                 wifibroadcast start
                 /etc/init.d/S95majestic start
             fi
-            echo "Normal: VTX Temp:&T WifiTemp:&W"
+            echo "Normal: VTX Temp:&T WifiTemp:&W &L30 &G9 &F12"
         
         elif [ "$current_state" -eq 1 ]; then
-            echo "Warning: High temperature detected. VTX Temp:&T WifiTemp:&W" > /tmp/MSPOSD.msg
+            echo "Warning: High temperature detected.\nVTX Temp:&T WifiTemp:&W &L30 &G9 &F12" > /tmp/MSPOSD.msg
         
         elif [ "$current_state" -eq 2 ]; then
-            echo "Warning: High temperature detected. VTX will soon thermal throttle...VTX Temp:&T WifiTemp:&W" > /tmp/MSPOSD.msg
+            echo "Warning: High temperature detected.\nVTX will soon thermal throttle...\nVTX Temp:&T WifiTemp:&W &L30 &G9 &F12" > /tmp/MSPOSD.msg
         
         elif [ "$current_state" -eq 3 ]; then
             # Throttle Level 1 commands only if moving upward (old_state < new_state)
@@ -107,18 +107,18 @@ while true; do
                 iw dev wlan0 set txpower fixed $txpower_value
                 echo setfps 0 30 > /proc/mi_modules/mi_sensor/mi_sensor0
             fi
-            echo "Throttling VTX (level 1). Reboot imminent, return to home..VTX Temp:&T WifiTemp:&W" > /tmp/MSPOSD.msg
+            echo "Throttling VTX (level 1).\nReboot imminent, return to home...\nVTX Temp:&T WifiTemp:&W &L30 &G9 &F12" > /tmp/MSPOSD.msg
         
         elif [ "$current_state" -eq 4 ]; then
             # Throttle Level 2 commands only if moving upward (old_state < new_state)
             if [ "$current_state" -gt "$old_state" ]; then
-                echo "Severe throttling VTX (level 2). Video will stop in 10sec, return to home..VTX Temp:&T WifiTemp:&W" > /tmp/MSPOSD.msg
+                echo "Severe throttling VTX (level 2).\nVideo will stop in 10sec, return to home...\nVTX Temp:&T WifiTemp:&W &L30 &G9 &F12" > /tmp/MSPOSD.msg
                 sleep 10
                 /etc/init.d/S95majestic stop
             fi
             
         elif [ "$current_state" -eq 5 ]; then
-            echo "VTX will reboot due to thermal state...VTX Temp:&T WifiTemp:&W. Rebooting in 5 seconds..."
+            echo "VTX will reboot due to thermal state...VTX Temp:&T WifiTemp:&W &L30 &G9 &F12. Rebooting in 5 seconds..."
             sleep 5
             reboot
         fi
@@ -128,19 +128,19 @@ while true; do
         elapsed=$(($(date +%s) - state_start_time))
         case $current_state in
             0)
-                echo "Normal: VTX Temp:&T WifiTemp:&W (State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
+                echo "Normal: VTX Temp:&T WifiTemp:&W &L30 &G9 &F12 (State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
                 ;;
             1)
-                echo "Warning: High temperature detected. VTX Temp:&T WifiTemp:&W (State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
+                echo "Warning: High temperature detected.\nVTX Temp:&T WifiTemp:&W &L30 &G9 &F12 (State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
                 ;;
             2)
-                echo "Warning: High temperature detected. VTX will soon thermal throttle...VTX Temp:&T WifiTemp:&W (State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
+                echo "Warning: High temperature detected.\nVTX will soon thermal throttle...\nVTX Temp:&T WifiTemp:&W &L30 &G9 &F12 (State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
                 ;;
             3)
-                echo "Throttling VTX (level 1). Reboot imminent, return to home..VTX Temp:&T WifiTemp:&W (State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
+                echo "Throttling VTX (level 1).\nReboot imminent, return to home...\nVTX Temp:&T WifiTemp:&W &L30 &G9 &F12 (State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
                 ;;
             4)
-                echo "Severe throttling VTX (level 2). Reboot imminent, return to home..VTX Temp:&T WifiTemp:&W (State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
+                echo "Severe throttling VTX (level 2).\nReboot imminent, return to home...\nVTX Temp:&T WifiTemp:&W &L30 &G9 &F12 (State for ${elapsed} seconds)" > /tmp/MSPOSD.msg
                 ;;
             5)
                 # Reboot state should not linger.
