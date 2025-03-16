@@ -1,13 +1,17 @@
-#!/bin/sh
-# Live bitrate setter with near max TX power.
-# Convert incoming argument $1 (range: 950-2050) to a new value in the range 2800-18000.
-# The linear conversion formula is:
-#   new_value = ((input - 950) * (18000 - 2800)) / (2050 - 950) + 2800
-# Simplified, that becomes:
-#   new_value = ((input - 950) * 15200) / 1100 + 2800
+#!/bin/bash
 
-new_value=$(( (($1 - 950) * 15200) / 1100 + 2800 ))
-echo "Channel12 conversion: Input $1 -> New value $new_value"
+# Configuration parameters (adjust these as needed)
+INPUT_MIN=950
+INPUT_MAX=2050
+OUTPUT_MIN=2800
+OUTPUT_MAX=18000
+
+# Input value from argument $1 (expected range: 950-2050)
+input_value=$1
+
+# Perform the linear conversion:
+new_value=$(( ( (input_value - INPUT_MIN) * (OUTPUT_MAX - OUTPUT_MIN) ) / (INPUT_MAX - INPUT_MIN) + OUTPUT_MIN ))
+echo "Channel12 conversion: Input $input_value -> New value $new_value (Output range: $OUTPUT_MIN-$OUTPUT_MAX)"
 
 echo "Running logic on msposd channel 12"
 set_live_bitrate.sh "$new_value"
