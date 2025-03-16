@@ -13,8 +13,8 @@ fi
 ORIGINAL_CHANNEL="$1"
 ORIGINAL_BANDWIDTH="$2"
 
-# Wait for 15 seconds before reverting (acts as the kill switch timeout)
-sleep 20
+# Wait for 25 seconds before reverting (acts as the kill switch timeout)
+sleep 25
 
 # Restore the original channel value                                                                                
 yaml-cli -i /etc/wfb.yaml -s .wireless.channel "$ORIGINAL_CHANNEL" 2>/dev/null                                      
