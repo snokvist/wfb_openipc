@@ -76,6 +76,13 @@ while true; do
         new_state=5
     fi
 
+    # --- Enforce recovery rule ---
+    # If we've reached a high state (>=3) before, then ignore intermediate warning states.
+    # Only allow a lower state if it's 0.
+    if [ "$current_state" -ge 3 ] && [ "$new_state" -lt "$current_state" ] && [ "$new_state" -ne 0 ]; then
+        new_state=$current_state
+    fi
+
     # --- Check for state change with a persistence requirement ---
     if [ "$new_state" -ne "$current_state" ]; then
         # If the pending state is not set or is different than the new state,
@@ -142,7 +149,7 @@ while true; do
             fi
         fi
     else
-        # New state is same as current_state; clear any pending change.
+        # New state is the same as current_state; clear any pending change.
         pending_state=""
         pending_state_start_time=""
         
