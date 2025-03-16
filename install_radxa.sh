@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/bash
 
 apt-get install iptables-persistent
 iptables -t nat -A POSTROUTING -s 10.5.0.10 -o eth0 -j MASQUERADE
