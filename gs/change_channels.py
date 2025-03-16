@@ -15,7 +15,7 @@ CHANGE_CMD_FILE = "/usr/sbin/wfb-ng-change.sh"   # command to run on nodes
 SSH_TIMEOUT = 5         # general SSH timeout in seconds
 
 # Dedicated constants for killswitch in --sync-vtx mode
-KILLSWITCH_DELAY = 5   # seconds to wait before attempting to kill killswitch
+KILLSWITCH_DELAY = 6   # seconds to wait before attempting to kill killswitch
 KILLSWITCH_TIMEOUT = 5 # seconds timeout for kill command
 
 # Dedicated constants for --find-vtx mode
