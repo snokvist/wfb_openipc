@@ -157,7 +157,7 @@ start_telemetry() {
     if [ "$TELEMETRY_ROUTER" = "msposd" ]; then
         echo "- Starting $TELEMETRY_ROUTER"
         size=$(yaml-cli -i /etc/majestic.yaml -g .video0.size)
-        msposd --baudrate 115200 --channels $TELEMETRY_CHANNELS --ahi 0 -osd -r "$TELEMETRY_OSD_FPS" \
+        msposd --baudrate 115200 --channels 5 --channels 8 --channels 12 --ahi 0 -osd -r "$TELEMETRY_OSD_FPS" \
             --master "$TELEMETRY_SERIAL" --out 10.5.0.1:14551 --size "${size:-1280x720}" > /dev/null &
     elif [ "$TELEMETRY_ROUTER" = "mavfwd" ]; then
         echo "- Starting $TELEMETRY_ROUTER"
