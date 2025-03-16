@@ -28,12 +28,12 @@ echo "Copying gs.key with passphrase \"openipc\" to /etc/"
 cp gs/gs.key /etc/gs.key
 
 echo "chmod +x on relevant files ..."
-chmod -R +x drone/usr/bin*
-chmod -R +x drone/etc/init.d/*
+chmod -R +x vtx/usr/bin*
+chmod -R +x vtx/etc/init.d/*
 
 echo "Starting scp ..."
 SSHPASS="12345" sshpass -e scp -o StrictHostKeyChecking=no -O -v -r -p /etc/gs.key root@"$IP":/etc/drone.key 2>&1 | grep -v debug1
-SSHPASS="12345" sshpass -e scp -o StrictHostKeyChecking=no -O -v -r -p drone/* root@"$IP":/ 2>&1 | grep -v debug1
+SSHPASS="12345" sshpass -e scp -o StrictHostKeyChecking=no -O -v -r -p vtx/* root@"$IP":/ 2>&1 | grep -v debug1
 
 echo "Scp completed ... rebooting ... wait for reconnect..."
 SSHPASS="12345" sshpass -e ssh -o StrictHostKeyChecking=no -t root@"$IP" 'reboot' 2>&1 | grep -v debug1
