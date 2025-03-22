@@ -10,6 +10,6 @@
 # bits.
 #
 # By default this script does nothing.
-echo "&L04 &F22 CPU:&C &B temp:&T" >/tmp/MSPOSD.msg
+echo "Custom Message... &L04 &F22 CPU:&C &B temp:&T\n Line 2 with more data &G8 &L30 &F30" >/tmp/MSPOSD.msg
 
 exit 0
