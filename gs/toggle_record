@@ -1,0 +1,6 @@
+#!/bin/bash
+
+
+kill -SIGUSR1 $(pidof pixelpilot)
+
+exit 0
