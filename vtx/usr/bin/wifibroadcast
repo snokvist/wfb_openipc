@@ -149,9 +149,6 @@ start_telemetry() {
     if [ "$(ipcinfo -c)" = "ssc33x" ]; then
         devmem 0x1F207890 16 0x8
     fi
-    
-#!/bin/sh
-
 # Start msposd if TELEMETRY_ROUTER is "msposd" or "msposd+mavfwd"
 case "$TELEMETRY_ROUTER" in
   msposd|msposd+mavfwd)
