@@ -57,7 +57,7 @@ wfb_yaml() {
             fi
         done
 
-        telemetry_keys="router serial osd_fps channels mavfwd_port msposd_port mavfwd_baud msposd_baud"
+        telemetry_keys="router osd_fps channels mavfwd_port msposd_port mavfwd_baud msposd_baud mavfwd_serial msposd_serial msposd_matrix"
         for key in $telemetry_keys; do
             val="$(yaml-cli -i "$CONFIG_FILE" -g ".telemetry.$key" 2>/dev/null)"
             if [ -n "$val" ]; then
@@ -167,7 +167,7 @@ case "$TELEMETRY_ROUTER" in
     fi
 
     msposd --baudrate "$TELEMETRY_MSPOSD_BAUD" $channels_arg --ahi 0 -osd -r "$TELEMETRY_OSD_FPS" \
-      --master "$TELEMETRY_SERIAL" --out 10.5.0.1:$TELEMETRY_MSPOSD_PORT --size "${size:-1280x720}" > /dev/null &
+      --master "$TELEMETRY_MSPOSD_SERIAL" --out 10.5.0.1:"$TELEMETRY_MSPOSD_PORT" -x "$TELEMETRY_MSPOSD_MATRIX" --size "${size:-1280x720}" > /dev/null &
     ;;
 esac
 
@@ -175,8 +175,8 @@ esac
 case "$TELEMETRY_ROUTER" in
   mavfwd|msposd+mavfwd)
     echo "- Starting mavfwd"
-    mavfwd --baudrate "$TELEMETRY_MAVFWD_BAUD" --channels "$TELEMETRY_CHANNELS" -p 100 -a 15 -t \
-      --master "$TELEMETRY_SERIAL" --in 0.0.0.0:14550 --out 10.5.0.1:"$TELEMETRY_MAVFWD_PORT" > /dev/null &
+    mavfwd --baudrate "$TELEMETRY_MAVFWD_BAUD" --channels "$TELEMETRY_CHANNELS" -p 100 -a 10 -t \
+      --master "$TELEMETRY_MAVFWD_SERIAL" --in 0.0.0.0:14550 --out 10.5.0.1:"$TELEMETRY_MAVFWD_PORT" > /dev/null &
     ;;
 esac
 
