@@ -166,7 +166,7 @@ case "$TELEMETRY_ROUTER" in
       IFS="$oldIFS"
     fi
 
-    msposd --baudrate $TELEMETRY_MSPOSD_BAUD $channels_arg --ahi 0 -osd -r "$TELEMETRY_OSD_FPS" \
+    msposd --baudrate "$TELEMETRY_MSPOSD_BAUD" $channels_arg --ahi 0 -osd -r "$TELEMETRY_OSD_FPS" \
       --master "$TELEMETRY_SERIAL" --out 10.5.0.1:$TELEMETRY_MSPOSD_PORT --size "${size:-1280x720}" > /dev/null &
     ;;
 esac
@@ -175,8 +175,8 @@ esac
 case "$TELEMETRY_ROUTER" in
   mavfwd|msposd+mavfwd)
     echo "- Starting mavfwd"
-    mavfwd --baudrate $TELEMETRY_MAVFWD_BAUD --channels "$TELEMETRY_CHANNELS" -p 100 -a 15 -t \
-      --master "$TELEMETRY_SERIAL" --in 0.0.0.0:14550 --out 10.5.0.1:$TELEMETRY_MAVFWD_PORT > /dev/null &
+    mavfwd --baudrate "$TELEMETRY_MAVFWD_BAUD" --channels "$TELEMETRY_CHANNELS" -p 100 -a 15 -t \
+      --master "$TELEMETRY_SERIAL" --in 0.0.0.0:14550 --out 10.5.0.1:"$TELEMETRY_MAVFWD_PORT" > /dev/null &
     ;;
 esac
 
