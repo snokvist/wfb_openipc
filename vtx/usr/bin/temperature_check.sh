@@ -3,32 +3,32 @@
 NORMAL_THRESHOLD=85    # Normal if below 80°C
 REBOOT_THRESHOLD=100   # Reboot if 100°C or higher
 
+# --- Get Adapter Temperature ---
+wifi_adapter=$(yaml-cli -i /etc/vtx_info.yaml -g .wifi.wifi_adapter)
+adapter_temp=0
+if [ "$wifi_adapter" = "8733bu" ]; then
+    # Expected format: "rf_path: 0, thermal_value: 37, offset: 45, temperature: 20"
+    adapter_temp=$(grep -o 'temperature: [0-9]*' /proc/net/rtl8733bu/wlan0/thermal_state | awk '{print $2}')
+elif [ "$wifi_adapter" = "88XXau" ]; then
+    echo "Adapter 88XXau temperature extraction not implemented yet."
+    adapter_temp=0
+elif [ "$wifi_adapter" = "8812eu" ]; then
+    if [ -f /proc/net/rtl88x2eu/wlan0/thermal_state ]; then
+        # Extract both temperature values and choose the highest
+        adapter_temp=$(grep -o 'temperature: [0-9]*' /proc/net/rtl88x2eu/wlan0/thermal_state | awk '{print $2}' | sort -n | tail -1)
+    else
+        echo "Thermal state file for 8812eu not found."
+        adapter_temp=0
+    fi
+else
+    echo "Unknown adapter type: $wifi_adapter"
+fi
+
 while true; do
     # --- Get VTX Temperature ---
     # Example output from ipcinfo --temp: "39.00"
     vtx_temp=$(ipcinfo --temp)
     vtx_int=$(echo "$vtx_temp" | cut -d. -f1)
-    
-    # --- Get Adapter Temperature ---
-    wifi_adapter=$(yaml-cli -i /etc/vtx_info.yaml -g .wifi.wifi_adapter)
-    adapter_temp=0
-    if [ "$wifi_adapter" = "8733bu" ]; then
-        # Expected format: "rf_path: 0, thermal_value: 37, offset: 45, temperature: 20"
-        adapter_temp=$(grep -o 'temperature: [0-9]*' /proc/net/rtl8733bu/wlan0/thermal_state | awk '{print $2}')
-    elif [ "$wifi_adapter" = "88XXau" ]; then
-        echo "Adapter 88XXau temperature extraction not implemented yet."
-        adapter_temp=0
-    elif [ "$wifi_adapter" = "8812eu" ]; then
-        if [ -f /proc/net/rtl88x2eu/wlan0/thermal_state ]; then
-            # Extract both temperature values and choose the highest
-            adapter_temp=$(grep -o 'temperature: [0-9]*' /proc/net/rtl88x2eu/wlan0/thermal_state | awk '{print $2}' | sort -n | tail -1)
-        else
-            echo "Thermal state file for 8812eu not found."
-            adapter_temp=0
-        fi
-    else
-        echo "Unknown adapter type: $wifi_adapter"
-    fi
 
     # Fallback if adapter_temp is empty
     if [ -z "$adapter_temp" ]; then
