@@ -44,7 +44,7 @@ android_tunnel:
 telemetry:
   router: msposd
   mavfwd_port: 14600
-  msposd_port: 14552
+  msposd_port: 14551
   serial: /dev/ttyS2
   osd_fps: 1010
   channels: 5
