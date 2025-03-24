@@ -57,7 +57,7 @@ wfb_yaml() {
             fi
         done
 
-        telemetry_keys="router serial osd_fps channels"
+        telemetry_keys="router serial osd_fps channels mavwfd_port msposd_port"
         for key in $telemetry_keys; do
             val="$(yaml-cli -i "$CONFIG_FILE" -g ".telemetry.$key" 2>/dev/null)"
             if [ -n "$val" ]; then
