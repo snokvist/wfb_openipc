@@ -42,12 +42,15 @@ android_tunnel:
   ldpc: 0
   stbc: 0
 telemetry:
-  router: msposd
+  router: msposd+mavfwd
   mavfwd_port: 14600
-  msposd_port: 14551
   mavfwd_baud: 460800
+  mavfwd_serial: /dev/ttyS2
+  msposd_matrix: 99
+  msposd_port: 14551
   msposd_baud: 115200
-  serial: /dev/ttyS2
+  msposd_serial: /dev/ttyS0
+  
   osd_fps: 1010
   channels: 5
   tx_on_arm: enabled
