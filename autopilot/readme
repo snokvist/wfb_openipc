@@ -1,4 +1,4 @@
-autopilot_armhf: invalid option -- '-'
+autopilot_armhf:
 Usage: autopilot_armhf [-v] [-s system_id] [-c component_id] [-t vehicle_type] [-a autopilot_type] [-m custom_mode] [-b base_mode]
 
 root@openipc-ssc338q:~# autopilot_armhf -v
