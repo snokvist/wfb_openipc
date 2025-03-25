@@ -12,9 +12,12 @@
  *      * Responds to PARAM_REQUEST_LIST, PARAM_REQUEST_READ, and PARAM_SET.
  *  - Saves the latest received RC_CHANNELS_OVERRIDE, RADIO_STATUS, and RAW_IMU
  *    messages and echoes them back every 500ms.
+ *  - Checks every 100ms for a file (/tmp/message.mavlink) containing a text
+ *    message. If found, sends it as a STATUSTEXT message (which shows up in QGC)
+ *    and deletes the file.
  *
  * Command-line options:
- *   -v             : Enable verbose mode (print received messages)
+ *   -v             : Increase verbosity (can be specified twice for extra detail)
  *   -s <system_id> : Set the MAVLink system ID (default: 1)
  *   -c <comp_id>   : Set the MAVLink component ID (default: MAV_COMP_ID_AUTOPILOT1)
  *   -t <veh_type>  : Set the vehicle type (default: MAV_TYPE_FIXED_WING)
@@ -24,6 +27,7 @@
  *
  * Usage example:
  *   ./advanced_mavlink_autopilot -v -s 1 -c 240 -t 2 -a 3 -m 0 -b 81
+ *   ./advanced_mavlink_autopilot -vv ... (for extra verbose output)
  *
  * NOTE: Adjust include paths and message details for your MAVLink dialect.
  */
@@ -39,12 +43,16 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <getopt.h>
+#include <sys/stat.h>
 #include "mavlink/common/mavlink.h"  // Ensure the correct MAVLink dialect header is included
 
 #define SERIAL_PORT "/dev/ttyS2"
 #define BAUDRATE B460800
 #define HEARTBEAT_INTERVAL_SEC 1
 #define ECHO_INTERVAL_MS 500
+#define MSG_CHECK_INTERVAL_MS 100
+#define MESSAGE_FILE "/tmp/message.mavlink"
+#define STATUSTEXT_MAX_LEN 50
 
 volatile bool running = true;
 
@@ -122,7 +130,7 @@ void usage(const char *progname) {
 }
 
 int main(int argc, char *argv[]) {
-    bool verbose = false;
+    int verbosity = 0; // 0: quiet, 1: moderate, 2: extra verbose
     uint8_t system_id = 1;                        // Default system ID
     uint8_t component_id = MAV_COMP_ID_AUTOPILOT1;  // Default component ID
     uint8_t vehicle_type = MAV_TYPE_FIXED_WING;     // Default vehicle type
@@ -131,10 +139,10 @@ int main(int argc, char *argv[]) {
     uint8_t base_mode = 0;                          // Default base mode
 
     int opt;
-    while ((opt = getopt(argc, argv, "vs:c:t:a:m:b:")) != -1) {
+    while ((opt = getopt(argc, argv, "v:s:c:t:a:m:b:")) != -1) {
         switch (opt) {
             case 'v':
-                verbose = true;
+                verbosity++;  // Use -v for moderate, -vv for extra verbose
                 break;
             case 's':
                 system_id = (uint8_t)atoi(optarg);
@@ -177,11 +185,12 @@ int main(int argc, char *argv[]) {
     mavlink_status_t status;
     uint8_t buffer[1024];
 
-    struct timeval last_heartbeat, last_echo, current;
+    struct timeval last_heartbeat, last_echo, last_msg_check, current;
     gettimeofday(&last_heartbeat, NULL);
     last_echo = last_heartbeat;
+    last_msg_check = last_heartbeat;
 
-    if (verbose) {
+    if (verbosity >= 1) {
         printf("Starting advanced MAVLink autopilot with parameters:\n");
         printf("  System ID: %d\n", system_id);
         printf("  Component ID: %d\n", component_id);
@@ -189,7 +198,7 @@ int main(int argc, char *argv[]) {
         printf("  Autopilot Type: %d\n", autopilot_type);
         printf("  Custom Mode: %u\n", custom_mode);
         printf("  Base Mode: %d\n", base_mode);
-        printf("  Verbose: %s\n", verbose ? "Yes" : "No");
+        printf("  Verbosity: %d\n", verbosity);
         printf("  Serial Port: %s @ baudrate 460800\n", SERIAL_PORT);
     }
 
@@ -198,7 +207,7 @@ int main(int argc, char *argv[]) {
         if (n > 0) {
             for (int i = 0; i < n; i++) {
                 if (mavlink_parse_char(MAVLINK_COMM_0, buffer[i], &msg, &status)) {
-                    if (verbose) {
+                    if (verbosity >= 2) {  // Extra verbose prints every received message
                         printf("Received message: ID %d from system %d, component %d\n",
                                msg.msgid, msg.sysid, msg.compid);
                     }
@@ -207,7 +216,7 @@ int main(int argc, char *argv[]) {
                         case MAVLINK_MSG_ID_COMMAND_LONG: {
                             mavlink_command_long_t cmd;
                             mavlink_msg_command_long_decode(&msg, &cmd);
-                            if (verbose) {
+                            if (verbosity >= 2) {
                                 printf("Received COMMAND_LONG: command %d, confirmation %d\n",
                                        cmd.command, cmd.confirmation);
                             }
@@ -220,13 +229,13 @@ int main(int argc, char *argv[]) {
                                                          cmd.target_system, cmd.target_component);
                             int len = mavlink_msg_to_send_buffer(ack_buffer, &ack_msg);
                             write(serial_fd, ack_buffer, len);
-                            if (verbose) {
+                            if (verbosity >= 1) {
                                 printf("Sent COMMAND_ACK for command %d\n", cmd.command);
                             }
                             break;
                         }
                         case MAVLINK_MSG_ID_PARAM_REQUEST_LIST: {
-                            if (verbose) {
+                            if (verbosity >= 1) {
                                 printf("Received PARAM_REQUEST_LIST from system %d, component %d\n", msg.sysid, msg.compid);
                             }
                             /* Send all parameters in our table */
@@ -240,7 +249,7 @@ int main(int argc, char *argv[]) {
                                                              PARAM_COUNT, i);
                                 int len = mavlink_msg_to_send_buffer(param_buffer, &param_msg);
                                 write(serial_fd, param_buffer, len);
-                                if (verbose) {
+                                if (verbosity >= 1) {
                                     printf("Sent PARAM_VALUE for %s\n", parameters[i].name);
                                 }
                             }
@@ -249,7 +258,7 @@ int main(int argc, char *argv[]) {
                         case MAVLINK_MSG_ID_PARAM_REQUEST_READ: {
                             mavlink_param_request_read_t req;
                             mavlink_msg_param_request_read_decode(&msg, &req);
-                            if (verbose) {
+                            if (verbosity >= 1) {
                                 printf("Received PARAM_REQUEST_READ for %s\n", req.param_id);
                             }
                             /* Search our parameter table */
@@ -264,7 +273,7 @@ int main(int argc, char *argv[]) {
                                                                  PARAM_COUNT, i);
                                     int len = mavlink_msg_to_send_buffer(param_buffer, &param_msg);
                                     write(serial_fd, param_buffer, len);
-                                    if (verbose) {
+                                    if (verbosity >= 1) {
                                         printf("Sent PARAM_VALUE for %s\n", parameters[i].name);
                                     }
                                     break;
@@ -275,7 +284,7 @@ int main(int argc, char *argv[]) {
                         case MAVLINK_MSG_ID_PARAM_SET: {
                             mavlink_param_set_t set_req;
                             mavlink_msg_param_set_decode(&msg, &set_req);
-                            if (verbose) {
+                            if (verbosity >= 1) {
                                 printf("Received PARAM_SET for %s to value %f\n", set_req.param_id, set_req.param_value);
                             }
                             /* Update parameter if found */
@@ -292,7 +301,7 @@ int main(int argc, char *argv[]) {
                                                                  PARAM_COUNT, i);
                                     int len = mavlink_msg_to_send_buffer(param_buffer, &param_msg);
                                     write(serial_fd, param_buffer, len);
-                                    if (verbose) {
+                                    if (verbosity >= 1) {
                                         printf("Updated and sent PARAM_VALUE for %s\n", parameters[i].name);
                                     }
                                     break;
@@ -301,7 +310,7 @@ int main(int argc, char *argv[]) {
                             break;
                         }
                         case MAVLINK_MSG_ID_MISSION_REQUEST_LIST: {
-                            if (verbose) {
+                            if (verbosity >= 1) {
                                 printf("Received MISSION_REQUEST_LIST from system %d, component %d\n", msg.sysid, msg.compid);
                             }
                             mavlink_message_t mission_count_msg;
@@ -312,7 +321,7 @@ int main(int argc, char *argv[]) {
                                                            MISSION_COUNT, MAV_MISSION_TYPE_MISSION);
                             int len = mavlink_msg_to_send_buffer(mission_buffer, &mission_count_msg);
                             write(serial_fd, mission_buffer, len);
-                            if (verbose) {
+                            if (verbosity >= 1) {
                                 printf("Sent MISSION_COUNT with count=%d\n", MISSION_COUNT);
                             }
                             break;
@@ -320,7 +329,7 @@ int main(int argc, char *argv[]) {
                         case MAVLINK_MSG_ID_MISSION_REQUEST: {
                             mavlink_mission_request_t req;
                             mavlink_msg_mission_request_decode(&msg, &req);
-                            if (verbose) {
+                            if (verbosity >= 1) {
                                 printf("Received MISSION_REQUEST for seq %d\n", req.seq);
                             }
                             /* For our single mission item (seq==0) */
@@ -342,7 +351,7 @@ int main(int argc, char *argv[]) {
                                                               MAV_MISSION_TYPE_MISSION);
                                 int len = mavlink_msg_to_send_buffer(mission_buffer, &mission_item_msg);
                                 write(serial_fd, mission_buffer, len);
-                                if (verbose) {
+                                if (verbosity >= 1) {
                                     printf("Sent MISSION_ITEM for seq 0\n");
                                 }
                             }
@@ -384,7 +393,7 @@ int main(int argc, char *argv[]) {
                                        MAV_STATE_ACTIVE);
             int len = mavlink_msg_to_send_buffer(hb_buffer, &heartbeat);
             write(serial_fd, hb_buffer, len);
-            if (verbose) {
+            if (verbosity >= 1) {
                 printf("Sent HEARTBEAT.\n");
             }
             last_heartbeat = current;
@@ -452,6 +461,35 @@ int main(int argc, char *argv[]) {
                 write(serial_fd, echo_buffer, len);
             }
             last_echo = current;
+        }
+
+        /* Check every MSG_CHECK_INTERVAL_MS (100ms) for a message file */
+        long elapsed_msg_ms = (current.tv_sec - last_msg_check.tv_sec) * 1000 +
+                              (current.tv_usec - last_msg_check.tv_usec) / 1000;
+        if (elapsed_msg_ms >= MSG_CHECK_INTERVAL_MS) {
+            if (access(MESSAGE_FILE, F_OK) == 0) {
+                int fd_msg = open(MESSAGE_FILE, O_RDONLY);
+                if (fd_msg >= 0) {
+                    char msg_text[STATUSTEXT_MAX_LEN + 1];
+                    int nread = read(fd_msg, msg_text, STATUSTEXT_MAX_LEN);
+                    if (nread > 0) {
+                        msg_text[nread] = '\0';
+                        mavlink_message_t statustext_msg;
+                        uint8_t statustext_buffer[256];
+                        /* Use severity INFO (6) and pass 0 for id and chunk_seq */
+                        mavlink_msg_statustext_pack(system_id, component_id, &statustext_msg,
+                                                    MAV_SEVERITY_INFO, msg_text, 0, 0);
+                        int len = mavlink_msg_to_send_buffer(statustext_buffer, &statustext_msg);
+                        write(serial_fd, statustext_buffer, len);
+                        if (verbosity >= 1) {
+                            printf("Sent STATUSTEXT: %s\n", msg_text);
+                        }
+                    }
+                    close(fd_msg);
+                    unlink(MESSAGE_FILE);
+                }
+            }
+            last_msg_check = current;
         }
     }
 
