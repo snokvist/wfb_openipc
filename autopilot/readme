@@ -1,1 +1,27 @@
+autopilot_armhf: invalid option -- '-'
+Usage: autopilot_armhf [-v] [-s system_id] [-c component_id] [-t vehicle_type] [-a autopilot_type] [-m custom_mode] [-b base_mode]
+
+root@openipc-ssc338q:~# autopilot_armhf -v
+Starting advanced MAVLink autopilot with parameters:
+  System ID: 1
+  Component ID: 1
+  Vehicle Type: 1
+  Autopilot Type: 0
+  Custom Mode: 0
+  Base Mode: 0
+  Verbose: Yes
+  Serial Port: /dev/ttyS2 @ baudrate 460800
+Received message: ID 70 from system 255, component 68
+Received message: ID 109 from system 255, component 68
+Received message: ID 109 from system 255, component 68
+Received message: ID 70 from system 255, component 68
+Received message: ID 109 from system 255, component 68
+Received message: ID 109 from system 255, component 68
+Received message: ID 70 from system 255, component 68
+Received message: ID 109 from system 255, component 68
+Received message: ID 109 from system 255, component 68
+Received message: ID 70 from system 255, component 68
+Received message: ID 109 from system 255, component 68
+Received message: ID 109 from system 255, component 68
+Received message: ID 70 from system 255, component 68
 
