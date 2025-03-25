@@ -1,3 +1,10 @@
+todo:
+implement channels.sh support
+implement channel,bitrate,tx_pwr change
+implement status_message recept and display on msposd
+
+
+
 autopilot_armhf:
 Usage: autopilot_armhf [-v] [-s system_id] [-c component_id] [-t vehicle_type] [-a autopilot_type] [-m custom_mode] [-b base_mode]
 
