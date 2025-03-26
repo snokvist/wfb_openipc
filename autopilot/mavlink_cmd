@@ -1,0 +1,56 @@
+#!/bin/sh
+# autopilot_cmd - a skeleton command handler for autopilot settings and channels
+#
+# Usage:
+#   autopilot_cmd get <parameter>
+#   autopilot_cmd set <parameter> <value>
+#   autopilot_cmd <channel> <value>
+#
+# Replace the echo commands below with the actual system calls or logic.
+
+if [ "$1" = "get" ]; then
+    case "$2" in
+        VTX_POWER)
+            # Retrieve VTX_POWER (example)
+            echo "OK 20"
+            ;;
+        VIDEO_CH)
+            echo "OK 1"
+            ;;
+        VIDEO_BR)
+            echo "OK 5000"
+            ;;
+        VIDEO_PROFILE)
+            echo "OK 0"
+            ;;
+        *)
+            echo "ERROR Unknown parameter"
+            ;;
+    esac
+elif [ "$1" = "set" ]; then
+    case "$2" in
+        VTX_POWER)
+            # Set VTX_POWER to $3 (example)
+            echo "OK $3"
+            ;;
+        VIDEO_CH)
+            echo "OK $3"
+            ;;
+        VIDEO_BR)
+            echo "OK $3"
+            ;;
+        VIDEO_PROFILE)
+            echo "OK $3"
+            ;;
+        *)
+            echo "ERROR Unknown parameter"
+            ;;
+    esac
+else
+    # Assume first argument is a channel number, second is the value.
+    CHANNEL="$1"
+    VALUE="$2"
+    # Insert your command to process channel changes here.
+    # For example, update hardware PWM, etc.
+    echo "OK Channel $CHANNEL set to $VALUE"
+fi
