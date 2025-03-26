@@ -4,7 +4,7 @@ Parameters list, implement set/get/cmd commands:
 channel
 tx_pwr
 bitrate
-alink
+control_mode
 bind
 profile
 
