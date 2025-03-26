@@ -1,6 +1,15 @@
 todo:
 implement channels.sh support
-implement channel,bitrate,tx_pwr change
+Parameters list, implement set/get/cmd commands:
+channel
+bandwidth
+tx_pwr
+bitrate
+alink
+bind
+profile
+
+
 implement status_message recept and display on msposd
 forward mavlink stream to another udp ip:port
 autopilot_get
