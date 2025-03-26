@@ -4,30 +4,31 @@
  * A minimal autopilot that:
  *  - Sends periodic HEARTBEAT messages.
  *  - Responds to COMMAND_LONG with COMMAND_ACK.
- *  - Implements basic mission handling:
- *      * Replies to MISSION_REQUEST_LIST with a dummy mission (count=1).
- *      * Replies to MISSION_REQUEST with a dummy mission item.
  *  - Implements a parameter table for FPV-related settings:
- *      * VTX_POWER, VIDEO_CH, VIDEO_BR.
- *      * Responds to PARAM_REQUEST_LIST, PARAM_REQUEST_READ, and PARAM_SET.
+ *      * VTX_POWER, VIDEO_CH, VIDEO_BR, and VTX_PROFILE.
+ *      * Retrieves parameters using /usr/bin/autopilot_cmd (get) and accepts
+ *        updates via /usr/bin/autopilot_cmd (set).
  *  - Saves the latest received RC_CHANNELS_OVERRIDE, RADIO_STATUS, and RAW_IMU
  *    messages and echoes them back every 500ms.
  *  - Checks every 100ms for a file (/tmp/message.mavlink) containing a text
- *    message. If found, sends it as a STATUSTEXT message (which shows up in QGC)
- *    and deletes the file.
+ *    message. If found, sends it as a STATUSTEXT message (appearing in QGC) and deletes the file.
+ *  - Monitors specified RC channels (via the -C option, e.g. "-C 5,6") – for channels 5–12,
+ *    if a change of more than 20 persists for 100ms, a system command is executed
+ *    (with a 1000ms minimum delay between triggers) to update the setting.
  *
  * Command-line options:
- *   -v             : Increase verbosity (can be specified twice for extra detail)
+ *   -v             : Increase verbosity (use -v for moderate, -vv for extra verbose)
  *   -s <system_id> : Set the MAVLink system ID (default: 1)
  *   -c <comp_id>   : Set the MAVLink component ID (default: MAV_COMP_ID_AUTOPILOT1)
  *   -t <veh_type>  : Set the vehicle type (default: MAV_TYPE_FIXED_WING)
  *   -a <ap_type>   : Set the autopilot type (default: MAV_AUTOPILOT_GENERIC)
  *   -m <custom_mode>: Set the custom mode (default: 0)
  *   -b <base_mode> : Set the base mode (default: 0)
+ *   -C <channels>  : Comma-separated list of RC channels to monitor (only channels 5–12 allowed)
  *
- * Usage example:
+ * Usage examples:
  *   ./advanced_mavlink_autopilot -v -s 1 -c 240 -t 2 -a 3 -m 0 -b 81
- *   ./advanced_mavlink_autopilot -vv ... (for extra verbose output)
+ *   ./advanced_mavlink_autopilot -vv -C 5,6
  *
  * NOTE: Adjust include paths and message details for your MAVLink dialect.
  */
@@ -39,7 +40,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <termios.h>
-#include <sys/time.h>
+#include <time.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <getopt.h>
@@ -48,23 +49,14 @@
 
 #define SERIAL_PORT "/dev/ttyS2"
 #define BAUDRATE B460800
-#define HEARTBEAT_INTERVAL_SEC 1
+
+#define HEARTBEAT_INTERVAL_MS 1000
 #define ECHO_INTERVAL_MS 500
 #define MSG_CHECK_INTERVAL_MS 100
-#define MESSAGE_FILE "/tmp/message.mavlink"
+#define SLEEP_US 2000
 #define STATUSTEXT_MAX_LEN 50
 
 volatile bool running = true;
-
-/* Global storage for the latest received messages to echo back */
-static mavlink_rc_channels_override_t last_rc_channels = {0};
-static bool last_rc_channels_valid = false;
-
-static mavlink_radio_status_t last_radio_status = {0};
-static bool last_radio_status_valid = false;
-
-static mavlink_raw_imu_t last_raw_imu = {0};
-static bool last_raw_imu_valid = false;
 
 /* Parameter table definition */
 typedef struct {
@@ -73,20 +65,122 @@ typedef struct {
     uint8_t type;  // using MAV_PARAM_TYPE_REAL32
 } parameter_t;
 
-#define PARAM_COUNT 3
+#define PARAM_COUNT 4
 static parameter_t parameters[PARAM_COUNT] = {
-    {"VTX_POWER", 20.0f, MAV_PARAM_TYPE_REAL32},   // e.g., power in dBm or mW
-    {"VIDEO_CH",  1.0f, MAV_PARAM_TYPE_REAL32},      // video channel
-    {"VIDEO_BR", 5000.0f, MAV_PARAM_TYPE_REAL32}      // video bitrate (e.g., in kbps)
+    {"VTX_POWER", 20.0f, MAV_PARAM_TYPE_REAL32},
+    {"VIDEO_CH",  1.0f, MAV_PARAM_TYPE_REAL32},
+    {"VIDEO_BR", 5000.0f, MAV_PARAM_TYPE_REAL32},
+    {"VTX_PROFILE", 0.0f, MAV_PARAM_TYPE_REAL32}
 };
 
-/* Dummy mission parameters */
-#define MISSION_COUNT 1
+/* Global storage for echo messages */
+static mavlink_rc_channels_override_t last_rc_channels = {0};
+static bool last_rc_channels_valid = false;
+static mavlink_radio_status_t last_radio_status = {0};
+static bool last_radio_status_valid = false;
+static mavlink_raw_imu_t last_raw_imu = {0};
+static bool last_raw_imu_valid = false;
 
-/* Dummy mission item values (example waypoint) */
-#define DUMMY_LATITUDE   47.397742f   // degrees
-#define DUMMY_LONGITUDE   8.545594f   // degrees
-#define DUMMY_ALTITUDE   10.0f       // meters
+/* Monitored channel structure for -C option */
+typedef struct {
+    int channel;   // channel number (only 5 to 12 allowed)
+    int baseline;  // last known value
+    bool baseline_initialized;
+    struct timespec change_start; // when change began
+    struct timespec last_trigger; // last time command triggered
+    bool active_change;           // flag for ongoing change
+} monitored_channel_t;
+
+#define MAX_MONITORED_CHANNELS 8
+static monitored_channel_t monitored_channels[MAX_MONITORED_CHANNELS];
+static int monitored_channel_count = 0;
+#define CHANNEL_THRESHOLD 20
+#define CHANNEL_PERSIST_MS 100
+#define CHANNEL_TRIGGER_DELAY_MS 1000
+
+/* Helper function to compute elapsed ms between two timespecs */
+long elapsed_ms(struct timespec start, struct timespec end) {
+    return (end.tv_sec - start.tv_sec) * 1000 + (end.tv_nsec - start.tv_nsec) / 1000000;
+}
+
+/* Helper function to get RC channel value from mavlink_rc_channels_override_t */
+int get_rc_channel_value(const mavlink_rc_channels_override_t *rc, int channel) {
+    switch(channel) {
+        case 1: return rc->chan1_raw;
+        case 2: return rc->chan2_raw;
+        case 3: return rc->chan3_raw;
+        case 4: return rc->chan4_raw;
+        case 5: return rc->chan5_raw;
+        case 6: return rc->chan6_raw;
+        case 7: return rc->chan7_raw;
+        case 8: return rc->chan8_raw;
+        case 9: return rc->chan9_raw;
+        case 10: return rc->chan10_raw;
+        case 11: return rc->chan11_raw;
+        case 12: return rc->chan12_raw;
+        case 13: return rc->chan13_raw;
+        case 14: return rc->chan14_raw;
+        case 15: return rc->chan15_raw;
+        case 16: return rc->chan16_raw;
+        case 17: return rc->chan17_raw;
+        case 18: return rc->chan18_raw;
+        default: return -1;
+    }
+}
+
+/* Helper functions to run external commands for parameter get/set */
+float get_parameter_from_system(const char *param, float current_value, int verbosity) {
+    char command[128];
+    char buffer[128];
+    FILE *fp;
+    snprintf(command, sizeof(command), "/usr/bin/autopilot_cmd get %s", param);
+    fp = popen(command, "r");
+    if (!fp) {
+        if (verbosity >= 1) {
+            fprintf(stderr, "Error: Failed to run command: %s\n", command);
+        }
+        return current_value;
+    }
+    if (fgets(buffer, sizeof(buffer), fp) != NULL) {
+        if (strncmp(buffer, "OK", 2) == 0) {
+            float val = atof(buffer + 3); // assume output "OK <value>"
+            pclose(fp);
+            return val;
+        } else {
+            if (verbosity >= 1) {
+                fprintf(stderr, "Error: Command '%s' returned: %s\n", command, buffer);
+            }
+        }
+    }
+    pclose(fp);
+    return current_value;
+}
+
+bool set_parameter_in_system(const char *param, float new_value, int verbosity) {
+    char command[128];
+    char buffer[128];
+    FILE *fp;
+    snprintf(command, sizeof(command), "/usr/bin/autopilot_cmd set %s %f", param, new_value);
+    fp = popen(command, "r");
+    if (!fp) {
+        if (verbosity >= 1) {
+            fprintf(stderr, "Error: Failed to run command: %s\n", command);
+        }
+        return false;
+    }
+    if (fgets(buffer, sizeof(buffer), fp) != NULL) {
+        if (strncmp(buffer, "OK", 2) == 0) {
+            pclose(fp);
+            return true;
+        } else {
+            if (verbosity >= 1) {
+                fprintf(stderr, "Error: Command '%s' returned: %s\n", command, buffer);
+            }
+        }
+    }
+    pclose(fp);
+    return false;
+}
 
 /* Signal handler for graceful exit */
 void signal_handler(int signum) {
@@ -101,23 +195,19 @@ int set_interface_attribs(int fd, int speed) {
         perror("tcgetattr");
         return -1;
     }
-
     cfsetospeed(&tty, speed);
     cfsetispeed(&tty, speed);
-
-    tty.c_cflag = (tty.c_cflag & ~CSIZE) | CS8; // 8-bit chars
-    tty.c_iflag &= ~IGNBRK;                     // disable break processing
-    tty.c_lflag = 0;                            // no signaling chars, no echo, no canonical processing
-    tty.c_oflag = 0;                            // no remapping, no delays
-    tty.c_cc[VMIN]  = 0;                        // non-blocking read
-    tty.c_cc[VTIME] = 5;                        // 0.5 seconds read timeout
-
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY);      // shut off xon/xoff control
-    tty.c_cflag |= (CLOCAL | CREAD);             // ignore modem controls, enable reading
-    tty.c_cflag &= ~(PARENB | PARODD);           // shut off parity
+    tty.c_cflag = (tty.c_cflag & ~CSIZE) | CS8;
+    tty.c_iflag &= ~IGNBRK;
+    tty.c_lflag = 0;
+    tty.c_oflag = 0;
+    tty.c_cc[VMIN]  = 0;
+    tty.c_cc[VTIME] = 5;
+    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
+    tty.c_cflag |= (CLOCAL | CREAD);
+    tty.c_cflag &= ~(PARENB | PARODD);
     tty.c_cflag &= ~CSTOPB;
     tty.c_cflag &= ~CRTSCTS;
-
     if (tcsetattr(fd, TCSANOW, &tty) != 0) {
         perror("tcsetattr");
         return -1;
@@ -126,24 +216,34 @@ int set_interface_attribs(int fd, int speed) {
 }
 
 void usage(const char *progname) {
-    printf("Usage: %s [-v] [-s system_id] [-c component_id] [-t vehicle_type] [-a autopilot_type] [-m custom_mode] [-b base_mode]\n", progname);
+    printf("Usage: %s [-v] [-s system_id] [-c component_id] [-t vehicle_type] [-a autopilot_type] [-m custom_mode] [-b base_mode] [-C channels]\n", progname);
 }
 
 int main(int argc, char *argv[]) {
     int verbosity = 0; // 0: quiet, 1: moderate, 2: extra verbose
-    uint8_t system_id = 1;                        // Default system ID
-    uint8_t component_id = MAV_COMP_ID_AUTOPILOT1;  // Default component ID
-    uint8_t vehicle_type = MAV_TYPE_FIXED_WING;     // Default vehicle type
-    uint8_t autopilot_type = MAV_AUTOPILOT_GENERIC;   // Default autopilot type
-    uint32_t custom_mode = 0;                       // Default custom mode
-    uint8_t base_mode = 0;                          // Default base mode
+    uint8_t system_id = 1;
+    uint8_t component_id = MAV_COMP_ID_AUTOPILOT1;
+    uint8_t vehicle_type = MAV_TYPE_FIXED_WING;
+    uint8_t autopilot_type = MAV_AUTOPILOT_GENERIC;
+    uint32_t custom_mode = 0;
+    uint8_t base_mode = 0;
+    char *channels_arg = NULL;
 
     int opt;
-    while ((opt = getopt(argc, argv, "v:s:c:t:a:m:b:")) != -1) {
+    while ((opt = getopt(argc, argv, "v:s:c:t:a:m:b:C:")) != -1) {
         switch (opt) {
-            case 'v':
-                verbosity++;  // Use -v for moderate, -vv for extra verbose
+            case 'v': {
+                /* Count one v plus any additional v's concatenated */
+                verbosity++;
+                char *arg = argv[optind - 1];
+                if (arg[0] == '-' && arg[1] == 'v') {
+                    for (int j = 2; j < strlen(arg); j++) {
+                        if (arg[j] == 'v')
+                            verbosity++;
+                    }
+                }
                 break;
+            }
             case 's':
                 system_id = (uint8_t)atoi(optarg);
                 break;
@@ -162,20 +262,42 @@ int main(int argc, char *argv[]) {
             case 'b':
                 base_mode = (uint8_t)atoi(optarg);
                 break;
+            case 'C':
+                channels_arg = strdup(optarg);
+                break;
             default:
                 usage(argv[0]);
                 exit(EXIT_FAILURE);
         }
     }
 
-    signal(SIGINT, signal_handler);
+    /* Parse channels argument if provided */
+    if (channels_arg != NULL) {
+        char *token = strtok(channels_arg, ",");
+        while (token != NULL && monitored_channel_count < MAX_MONITORED_CHANNELS) {
+            int ch = atoi(token);
+            if (ch >= 5 && ch <= 12) {
+                monitored_channels[monitored_channel_count].channel = ch;
+                monitored_channels[monitored_channel_count].baseline = -1;
+                monitored_channels[monitored_channel_count].baseline_initialized = false;
+                monitored_channels[monitored_channel_count].active_change = false;
+                monitored_channels[monitored_channel_count].change_start.tv_sec = 0;
+                monitored_channels[monitored_channel_count].change_start.tv_nsec = 0;
+                monitored_channels[monitored_channel_count].last_trigger.tv_sec = 0;
+                monitored_channels[monitored_channel_count].last_trigger.tv_nsec = 0;
+                monitored_channel_count++;
+            }
+            token = strtok(NULL, ",");
+        }
+        free(channels_arg);
+    }
 
+    signal(SIGINT, signal_handler);
     int serial_fd = open(SERIAL_PORT, O_RDWR | O_NOCTTY | O_SYNC);
     if (serial_fd < 0) {
         perror("open");
         return 1;
     }
-
     if (set_interface_attribs(serial_fd, BAUDRATE) != 0) {
         close(serial_fd);
         return 1;
@@ -184,9 +306,8 @@ int main(int argc, char *argv[]) {
     mavlink_message_t msg;
     mavlink_status_t status;
     uint8_t buffer[1024];
-
-    struct timeval last_heartbeat, last_echo, last_msg_check, current;
-    gettimeofday(&last_heartbeat, NULL);
+    struct timespec last_heartbeat, last_echo, last_msg_check, current;
+    clock_gettime(CLOCK_MONOTONIC, &last_heartbeat);
     last_echo = last_heartbeat;
     last_msg_check = last_heartbeat;
 
@@ -200,6 +321,13 @@ int main(int argc, char *argv[]) {
         printf("  Base Mode: %d\n", base_mode);
         printf("  Verbosity: %d\n", verbosity);
         printf("  Serial Port: %s @ baudrate 460800\n", SERIAL_PORT);
+        if (monitored_channel_count > 0) {
+            printf("  Monitored channels: ");
+            for (int i = 0; i < monitored_channel_count; i++) {
+                printf("%d ", monitored_channels[i].channel);
+            }
+            printf("\n");
+        }
     }
 
     while (running) {
@@ -207,11 +335,10 @@ int main(int argc, char *argv[]) {
         if (n > 0) {
             for (int i = 0; i < n; i++) {
                 if (mavlink_parse_char(MAVLINK_COMM_0, buffer[i], &msg, &status)) {
-                    if (verbosity >= 2) {  // Extra verbose prints every received message
+                    if (verbosity >= 2) {
                         printf("Received message: ID %d from system %d, component %d\n",
                                msg.msgid, msg.sysid, msg.compid);
                     }
-
                     switch(msg.msgid) {
                         case MAVLINK_MSG_ID_COMMAND_LONG: {
                             mavlink_command_long_t cmd;
@@ -222,7 +349,6 @@ int main(int argc, char *argv[]) {
                             }
                             mavlink_message_t ack_msg;
                             uint8_t ack_buffer[256];
-                            /* Use the received target_system/target_component for reply */
                             mavlink_msg_command_ack_pack(system_id, component_id, &ack_msg,
                                                          cmd.command, MAV_RESULT_ACCEPTED,
                                                          0, 0,
@@ -238,8 +364,9 @@ int main(int argc, char *argv[]) {
                             if (verbosity >= 1) {
                                 printf("Received PARAM_REQUEST_LIST from system %d, component %d\n", msg.sysid, msg.compid);
                             }
-                            /* Send all parameters in our table */
                             for (uint8_t i = 0; i < PARAM_COUNT; i++) {
+                                /* Update parameter value from system */
+                                parameters[i].value = get_parameter_from_system(parameters[i].name, parameters[i].value, verbosity);
                                 mavlink_message_t param_msg;
                                 uint8_t param_buffer[256];
                                 mavlink_msg_param_value_pack(system_id, component_id, &param_msg,
@@ -250,7 +377,7 @@ int main(int argc, char *argv[]) {
                                 int len = mavlink_msg_to_send_buffer(param_buffer, &param_msg);
                                 write(serial_fd, param_buffer, len);
                                 if (verbosity >= 1) {
-                                    printf("Sent PARAM_VALUE for %s\n", parameters[i].name);
+                                    printf("Sent PARAM_VALUE for %s: %f\n", parameters[i].name, parameters[i].value);
                                 }
                             }
                             break;
@@ -261,9 +388,9 @@ int main(int argc, char *argv[]) {
                             if (verbosity >= 1) {
                                 printf("Received PARAM_REQUEST_READ for %s\n", req.param_id);
                             }
-                            /* Search our parameter table */
                             for (uint8_t i = 0; i < PARAM_COUNT; i++) {
                                 if (strncmp(req.param_id, parameters[i].name, sizeof(parameters[i].name)) == 0) {
+                                    parameters[i].value = get_parameter_from_system(parameters[i].name, parameters[i].value, verbosity);
                                     mavlink_message_t param_msg;
                                     uint8_t param_buffer[256];
                                     mavlink_msg_param_value_pack(system_id, component_id, &param_msg,
@@ -274,7 +401,7 @@ int main(int argc, char *argv[]) {
                                     int len = mavlink_msg_to_send_buffer(param_buffer, &param_msg);
                                     write(serial_fd, param_buffer, len);
                                     if (verbosity >= 1) {
-                                        printf("Sent PARAM_VALUE for %s\n", parameters[i].name);
+                                        printf("Sent PARAM_VALUE for %s: %f\n", parameters[i].name, parameters[i].value);
                                     }
                                     break;
                                 }
@@ -287,77 +414,32 @@ int main(int argc, char *argv[]) {
                             if (verbosity >= 1) {
                                 printf("Received PARAM_SET for %s to value %f\n", set_req.param_id, set_req.param_value);
                             }
-                            /* Update parameter if found */
                             for (uint8_t i = 0; i < PARAM_COUNT; i++) {
                                 if (strncmp(set_req.param_id, parameters[i].name, sizeof(parameters[i].name)) == 0) {
-                                    parameters[i].value = set_req.param_value;
-                                    /* Respond with updated parameter */
-                                    mavlink_message_t param_msg;
-                                    uint8_t param_buffer[256];
-                                    mavlink_msg_param_value_pack(system_id, component_id, &param_msg,
-                                                                 parameters[i].name,
-                                                                 parameters[i].value,
-                                                                 parameters[i].type,
-                                                                 PARAM_COUNT, i);
-                                    int len = mavlink_msg_to_send_buffer(param_buffer, &param_msg);
-                                    write(serial_fd, param_buffer, len);
-                                    if (verbosity >= 1) {
-                                        printf("Updated and sent PARAM_VALUE for %s\n", parameters[i].name);
+                                    if (set_parameter_in_system(parameters[i].name, set_req.param_value, verbosity)) {
+                                        parameters[i].value = set_req.param_value;
+                                        mavlink_message_t param_msg;
+                                        uint8_t param_buffer[256];
+                                        mavlink_msg_param_value_pack(system_id, component_id, &param_msg,
+                                                                     parameters[i].name,
+                                                                     parameters[i].value,
+                                                                     parameters[i].type,
+                                                                     PARAM_COUNT, i);
+                                        int len = mavlink_msg_to_send_buffer(param_buffer, &param_msg);
+                                        write(serial_fd, param_buffer, len);
+                                        if (verbosity >= 1) {
+                                            printf("Updated and sent PARAM_VALUE for %s: %f\n", parameters[i].name, parameters[i].value);
+                                        }
+                                    } else {
+                                        if (verbosity >= 1) {
+                                            printf("Failed to update parameter %s via system command.\n", parameters[i].name);
+                                        }
                                     }
                                     break;
                                 }
                             }
                             break;
                         }
-                        case MAVLINK_MSG_ID_MISSION_REQUEST_LIST: {
-                            if (verbosity >= 1) {
-                                printf("Received MISSION_REQUEST_LIST from system %d, component %d\n", msg.sysid, msg.compid);
-                            }
-                            mavlink_message_t mission_count_msg;
-                            uint8_t mission_buffer[256];
-                            /* Reply with a mission count of 1 and type MAV_MISSION_TYPE_MISSION (usually 0) */
-                            mavlink_msg_mission_count_pack(system_id, component_id, &mission_count_msg,
-                                                           msg.sysid, msg.compid,
-                                                           MISSION_COUNT, MAV_MISSION_TYPE_MISSION);
-                            int len = mavlink_msg_to_send_buffer(mission_buffer, &mission_count_msg);
-                            write(serial_fd, mission_buffer, len);
-                            if (verbosity >= 1) {
-                                printf("Sent MISSION_COUNT with count=%d\n", MISSION_COUNT);
-                            }
-                            break;
-                        }
-                        case MAVLINK_MSG_ID_MISSION_REQUEST: {
-                            mavlink_mission_request_t req;
-                            mavlink_msg_mission_request_decode(&msg, &req);
-                            if (verbosity >= 1) {
-                                printf("Received MISSION_REQUEST for seq %d\n", req.seq);
-                            }
-                            /* For our single mission item (seq==0) */
-                            if (req.seq == 0) {
-                                mavlink_message_t mission_item_msg;
-                                uint8_t mission_buffer[256];
-                                /* Pack a dummy mission item (e.g., a waypoint) */
-                                mavlink_msg_mission_item_pack(system_id, component_id, &mission_item_msg,
-                                                              msg.sysid, msg.compid,  // target system/component
-                                                              0,                     // seq
-                                                              MAV_FRAME_GLOBAL_RELATIVE_ALT,
-                                                              MAV_CMD_NAV_WAYPOINT,
-                                                              0,                     // current (0=false)
-                                                              1,                     // autocontinue
-                                                              0.0f, 0.0f, 0.0f, 0.0f, // params 1-4
-                                                              DUMMY_LATITUDE,
-                                                              DUMMY_LONGITUDE,
-                                                              DUMMY_ALTITUDE,
-                                                              MAV_MISSION_TYPE_MISSION);
-                                int len = mavlink_msg_to_send_buffer(mission_buffer, &mission_item_msg);
-                                write(serial_fd, mission_buffer, len);
-                                if (verbosity >= 1) {
-                                    printf("Sent MISSION_ITEM for seq 0\n");
-                                }
-                            }
-                            break;
-                        }
-                        /* Save incoming messages for echoing */
                         case MAVLINK_MSG_ID_RC_CHANNELS_OVERRIDE: {
                             mavlink_msg_rc_channels_override_decode(&msg, &last_rc_channels);
                             last_rc_channels_valid = true;
@@ -375,14 +457,15 @@ int main(int argc, char *argv[]) {
                         }
                         default:
                             break;
-                    } // switch
+                    }
                 }
             }
         }
 
-        /* Send heartbeat every HEARTBEAT_INTERVAL_SEC */
-        gettimeofday(&current, NULL);
-        if ((current.tv_sec - last_heartbeat.tv_sec) >= HEARTBEAT_INTERVAL_SEC) {
+        /* Update timers using clock_gettime */
+        clock_gettime(CLOCK_MONOTONIC, &current);
+        long heartbeat_elapsed = elapsed_ms(last_heartbeat, current);
+        if (heartbeat_elapsed >= HEARTBEAT_INTERVAL_MS) {
             mavlink_message_t heartbeat;
             uint8_t hb_buffer[256];
             mavlink_msg_heartbeat_pack(system_id, component_id, &heartbeat,
@@ -399,10 +482,8 @@ int main(int argc, char *argv[]) {
             last_heartbeat = current;
         }
 
-        /* Echo stored messages every ECHO_INTERVAL_MS (500ms) */
-        long elapsed_ms = (current.tv_sec - last_echo.tv_sec) * 1000 +
-                          (current.tv_usec - last_echo.tv_usec) / 1000;
-        if (elapsed_ms >= ECHO_INTERVAL_MS) {
+        long echo_elapsed = elapsed_ms(last_echo, current);
+        if (echo_elapsed >= ECHO_INTERVAL_MS) {
             mavlink_message_t echo_msg;
             uint8_t echo_buffer[256];
             int len;
@@ -463,12 +544,10 @@ int main(int argc, char *argv[]) {
             last_echo = current;
         }
 
-        /* Check every MSG_CHECK_INTERVAL_MS (100ms) for a message file */
-        long elapsed_msg_ms = (current.tv_sec - last_msg_check.tv_sec) * 1000 +
-                              (current.tv_usec - last_msg_check.tv_usec) / 1000;
-        if (elapsed_msg_ms >= MSG_CHECK_INTERVAL_MS) {
-            if (access(MESSAGE_FILE, F_OK) == 0) {
-                int fd_msg = open(MESSAGE_FILE, O_RDONLY);
+        long msg_check_elapsed = elapsed_ms(last_msg_check, current);
+        if (msg_check_elapsed >= MSG_CHECK_INTERVAL_MS) {
+            if (access("/tmp/message.mavlink", F_OK) == 0) {
+                int fd_msg = open("/tmp/message.mavlink", O_RDONLY);
                 if (fd_msg >= 0) {
                     char msg_text[STATUSTEXT_MAX_LEN + 1];
                     int nread = read(fd_msg, msg_text, STATUSTEXT_MAX_LEN);
@@ -476,7 +555,6 @@ int main(int argc, char *argv[]) {
                         msg_text[nread] = '\0';
                         mavlink_message_t statustext_msg;
                         uint8_t statustext_buffer[256];
-                        /* Use severity INFO (6) and pass 0 for id and chunk_seq */
                         mavlink_msg_statustext_pack(system_id, component_id, &statustext_msg,
                                                     MAV_SEVERITY_INFO, msg_text, 0, 0);
                         int len = mavlink_msg_to_send_buffer(statustext_buffer, &statustext_msg);
@@ -486,11 +564,69 @@ int main(int argc, char *argv[]) {
                         }
                     }
                     close(fd_msg);
-                    unlink(MESSAGE_FILE);
+                    unlink("/tmp/message.mavlink");
                 }
             }
             last_msg_check = current;
         }
+
+        /* Process monitored channels (if configured) */
+        if (monitored_channel_count > 0 && last_rc_channels_valid) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            for (int i = 0; i < monitored_channel_count; i++) {
+                int ch = monitored_channels[i].channel;
+                int current_val = get_rc_channel_value(&last_rc_channels, ch);
+                if (current_val < 0)
+                    continue;
+                if (!monitored_channels[i].baseline_initialized) {
+                    monitored_channels[i].baseline = current_val;
+                    monitored_channels[i].baseline_initialized = true;
+                }
+                int diff = abs(current_val - monitored_channels[i].baseline);
+                if (diff > CHANNEL_THRESHOLD) {
+                    if (!monitored_channels[i].active_change) {
+                        monitored_channels[i].active_change = true;
+                        clock_gettime(CLOCK_MONOTONIC, &monitored_channels[i].change_start);
+                    } else {
+                        long change_duration = elapsed_ms(monitored_channels[i].change_start, now);
+                        if (change_duration >= CHANNEL_PERSIST_MS) {
+                            long trigger_elapsed = elapsed_ms(monitored_channels[i].last_trigger, now);
+                            if (trigger_elapsed >= CHANNEL_TRIGGER_DELAY_MS) {
+                                char cmd[128];
+                                char output[128];
+                                snprintf(cmd, sizeof(cmd), "/usr/bin/autopilot_cmd %d %d", ch, current_val);
+                                FILE *fp = popen(cmd, "r");
+                                if (fp) {
+                                    if (fgets(output, sizeof(output), fp) != NULL) {
+                                        if (verbosity >= 1) {
+                                            printf("Triggered channel %d with value %d: %s\n", ch, current_val, output);
+                                        }
+                                    } else {
+                                        if (verbosity >= 1) {
+                                            printf("No output from command: %s\n", cmd);
+                                        }
+                                    }
+                                    pclose(fp);
+                                } else {
+                                    if (verbosity >= 1) {
+                                        printf("Failed to execute command: %s\n", cmd);
+                                    }
+                                }
+                                clock_gettime(CLOCK_MONOTONIC, &monitored_channels[i].last_trigger);
+                                monitored_channels[i].baseline = current_val;
+                                monitored_channels[i].active_change = false;
+                            }
+                        }
+                    }
+                } else {
+                    monitored_channels[i].active_change = false;
+                    monitored_channels[i].baseline = current_val;
+                }
+            }
+        }
+
+        usleep(SLEEP_US);
     }
 
     close(serial_fd);
