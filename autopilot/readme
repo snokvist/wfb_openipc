@@ -9,7 +9,7 @@ autopilot_cmd
 parameters to stream to gs, now chans, imu, heartbeat, radio
 which message to send as alink? RADIO_STATUS
 Set 50ms sleep ( if needed) to save resources
-Make a 
+Make a ini file (simple) with settings)
 
 
 autopilot_armhf:
