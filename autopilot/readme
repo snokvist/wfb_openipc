@@ -3,6 +3,11 @@ implement channels.sh support
 implement channel,bitrate,tx_pwr change
 implement status_message recept and display on msposd
 forward mavlink stream to another udp ip:port
+autopilot_get
+autopilot_set
+autopilot_cmd
+parameters to stream to gs, now chans, imu, heartbeat, radio
+which message to send as alink?
 
 
 autopilot_armhf:
