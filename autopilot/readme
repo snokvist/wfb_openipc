@@ -7,7 +7,7 @@ autopilot_get
 autopilot_set
 autopilot_cmd
 parameters to stream to gs, now chans, imu, heartbeat, radio
-which message to send as alink?
+which message to send as alink? RADIO_STATUS
 
 
 autopilot_armhf:
