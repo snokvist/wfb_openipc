@@ -132,7 +132,7 @@ def request_keyframe():
         if verbose_mode:
             print(f"Sent special message: {special_message}, attempt {attempt + 1}/{num_attempts}")
         time.sleep(0.05)
-    
+
 def drop_gop():
     special_message = "special:drop_gop"
     num_attempts = 5
@@ -216,7 +216,7 @@ def calculate_link_health(video_rx):
             link_health_score_snr = 1000
         else:
             link_health_score_snr = 1000 + ((avg_best_snr - min_snr) / (max_snr - min_snr)) * 1000
-        
+
         link_health_score_rssi = round(link_health_score_rssi)
         link_health_score_snr = round(link_health_score_snr)
 
@@ -224,9 +224,9 @@ def calculate_link_health(video_rx):
             print(f"Calculated Health Score RSSI: {link_health_score_rssi}, SNR: {link_health_score_snr}, "
                   f"Recovered: {recovered_packets}, Lost: {lost_packets}, "
                   f"Best Antennas RSSI: {best_antennas_rssi}, Best Antennas SNR: {best_antennas_snr}")
-        
+
         return link_health_score_rssi, link_health_score_snr
-    
+
     except Exception as e:
         if verbose_mode:
             print(f"Error calculating link health: {e}, video_rx data: {video_rx}")
@@ -265,10 +265,10 @@ def send_radio_status(recovered_packet_count):
 
     rssi_value = convert_health(link_health_score_rssi)
     noise_value = convert_health(link_health_score_snr)
-    
+
     # Map best antenna RSSI (assumed in range -128 to 128) to 0-254
     rem_rssi = int(round((best_antennas_rssi[0] + 128) * 254 / 256))
-    
+
     # Map best antenna SNR (assumed in range 0 to 50) to 0-254; clamp negatives to 0
     rem_snr_raw = best_antennas_snr[0]
     if rem_snr_raw < 0:
@@ -276,12 +276,12 @@ def send_radio_status(recovered_packet_count):
     elif rem_snr_raw > 50:
         rem_snr_raw = 50
     rem_noise = int(round(rem_snr_raw * 254 / 50))
-    
+
     fixed = min(recovered_packets, 254)
     rxerrors = min(recovered_packet_count, 254)
-    
+
     # Send the RADIO_STATUS message (fields: rssi, remrssi, noise, remnoise, rxerrors, fixed)
-    mav_conn.mav.radio_status_send(rssi_value, rem_rssi, noise_value, rem_noise, rxerrors, fixed)
+    mav_conn.mav.radio_status_send(rssi_value, rem_rssi, 0, noise_value, rem_noise, rxerrors, fixed)
     if verbose_mode:
         print(f"Sent RADIO_STATUS: rssi={rssi_value}, rem_rssi={rem_rssi}, noise={noise_value}, "
               f"rem_noise={rem_noise}, rxerrors={rxerrors}, fixed={fixed}")
@@ -293,7 +293,7 @@ def generate_package():
     """
     global recovered_packets_accumulator, last_accumulator_reset
     message_interval = int(config['Settings']['message_interval']) / 1000  # Convert to seconds
-    
+
     while True:
         timestamp = int(time.time())
         current_time = time.time()
@@ -303,16 +303,16 @@ def generate_package():
             last_accumulator_reset = current_time
         else:
             recovered_packet_count = recovered_packets_accumulator
-        
+
         # Construct the original UDP message (if still needed)
         message = f"{timestamp}:{link_health_score_rssi}:{link_health_score_snr}:{recovered_packets}:" \
                   f"{recovered_packet_count}:{best_antennas_rssi[0]}:{best_antennas_snr[0]}:" \
                   f"{best_antennas_snr[1]}:{best_antennas_snr[2]}"
         send_udp(message)
-        
+
         # Now send the MAVLink RADIO_STATUS message
         send_radio_status(recovered_packet_count)
-        
+
         time.sleep(message_interval)
 
 def connect_and_receive_msgpack():
