@@ -4,6 +4,7 @@
 # Usage:
 #   autopilot_cmd get <parameter>
 #   autopilot_cmd set <parameter> <value>
+#   autopilot_cmd statustext <parameter>
 #   autopilot_cmd <channel> <value>
 #
 # Replace the echo commands below with the actual system calls or logic.
@@ -42,6 +43,19 @@ elif [ "$1" = "set" ]; then
         VIDEO_PROFILE)
             echo "OK $3"
             ;;
+        *)
+            echo "ERROR Unknown parameter"
+            ;;
+    esac
+elif [ "$1" = "statustext" ]; then
+    # Handle the statustext command
+    case "$2" in
+        # Add cases for known parameters that require a status text response.
+        # Replace PARAM1 with an actual parameter name.
+        PARAM1)
+            echo "OK Status text for PARAM1: All systems nominal"
+            ;;
+        # You can add more parameters as needed.
         *)
             echo "ERROR Unknown parameter"
             ;;
