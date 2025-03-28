@@ -3,6 +3,10 @@ from flask import Flask, jsonify, request
 def run_flask(shared_state):
     app = Flask(__name__)
 
+    @app.route("/")
+    def index():
+        return send_from_directory("static", "index.html")
+
     @app.route("/parameters", methods=["GET"])
     def get_parameters():
         with shared_state.params_lock:
