@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MAVLink Parameter & ALINK RSSI</title>
+  <!-- Normalize CSS for consistency -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css">
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 1em;
+      background-color: #f4f4f4;
+    }
+    h1, h2 {
+      text-align: center;
+    }
+    .param-container {
+      margin: 1em 0;
+    }
+    .param-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.5em;
+      background: #fff;
+      margin-bottom: 0.5em;
+      border-radius: 5px;
+    }
+    .param-row span, .param-row input, .param-row button {
+      margin: 5px;
+      font-size: 1.1em;
+    }
+    input[type="number"] {
+      width: 60px;
+    }
+    #chartContainer {
+      margin: 1em 0;
+      height: 300px;
+    }
+  </style>
+  <!-- Include Chart.js from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <h1>MAVLink Parameter Control</h1>
+  <div class="param-container" id="paramContainer">
+    <!-- Dynamic parameter controls will be inserted here -->
+  </div>
+  <h2>ALINK RSSI Chart</h2>
+  <div id="chartContainer">
+    <canvas id="rssiChart"></canvas>
+  </div>
+
+  <script>
+    // --- Parameter Controls ---
+    // Poll the /parameters endpoint to build the parameter list dynamically.
+    async function fetchParameters() {
+      try {
+        const response = await fetch('/parameters');
+        return await response.json();
+      } catch (err) {
+        console.error('Error fetching parameters:', err);
+        return {};
+      }
+    }
+
+    // Build a parameter row with Get/Set buttons.
+    function buildParameterRow(paramId, paramData) {
+      const row = document.createElement('div');
+      row.className = 'param-row';
+
+      const nameSpan = document.createElement('span');
+      nameSpan.textContent = paramId;
+
+      const currentSpan = document.createElement('span');
+      currentSpan.textContent = "Current: " + Math.round(paramData.value);
+
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.value = Math.round(paramData.value);
+
+      const getButton = document.createElement('button');
+      getButton.textContent = 'Get';
+      getButton.onclick = async () => {
+        const res = await fetch(`/parameters/${paramId}`);
+        const data = await res.json();
+        if (data[paramId]) {
+          currentSpan.textContent = "Current: " + Math.round(data[paramId].value);
+          input.value = Math.round(data[paramId].value);
+        }
+      };
+
+      const setButton = document.createElement('button');
+      setButton.textContent = 'Set';
+      setButton.onclick = async () => {
+        const newVal = input.value;
+        const res = await fetch(`/parameters/${paramId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value: newVal })
+        });
+        const result = await res.json();
+        if (result.status) {
+          currentSpan.textContent = "Current: " + newVal;
+        } else {
+          alert('Error setting parameter: ' + JSON.stringify(result));
+        }
+      };
+
+      row.appendChild(nameSpan);
+      row.appendChild(currentSpan);
+      row.appendChild(document.createTextNode(' New: '));
+      row.appendChild(input);
+      row.appendChild(getButton);
+      row.appendChild(setButton);
+      return row;
+    }
+
+    async function updateParameters() {
+      const params = await fetchParameters();
+      const container = document.getElementById('paramContainer');
+      container.innerHTML = ''; // Clear container
+      for (const [paramId, paramData] of Object.entries(params)) {
+        const row = buildParameterRow(paramId, paramData);
+        container.appendChild(row);
+      }
+    }
+
+    // Update parameters on load and every 5 seconds.
+    updateParameters();
+    setInterval(updateParameters, 5000);
+
+    // --- ALINK RSSI Chart ---
+    const ctx = document.getElementById('rssiChart').getContext('2d');
+    let chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [{
+          label: 'ALINK RSSI',
+          data: [],
+          fill: false,
+          borderColor: 'blue'
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          x: {
+            type: 'time',
+            time: {
+              unit: 'second',
+              tooltipFormat: 'HH:mm:ss'
+            }
+          },
+          y: {
+            beginAtZero: true,
+            title: { display: true, text: 'RSSI' }
+          }
+        }
+      }
+    });
+
+    async function fetchAlinkStream() {
+      try {
+        const response = await fetch('/alink_stream');
+        return await response.json();
+      } catch (err) {
+        console.error('Error fetching ALINK stream:', err);
+        return {};
+      }
+    }
+
+    async function updateAlinkChart() {
+      const streamData = await fetchAlinkStream();
+      if (streamData['RADIO_STATUS']) {
+        // Get the last 100 messages
+        const messages = streamData['RADIO_STATUS'].slice(-100);
+        const labels = messages.map(m => new Date(m.timestamp * 1000));
+        const rssiValues = messages.map(m => m.rssi);
+        chart.data.labels = labels;
+        chart.data.datasets[0].data = rssiValues;
+        chart.update();
+      }
+    }
+
+    // Update the ALINK chart every 2 seconds.
+    setInterval(updateAlinkChart, 2000);
+  </script>
+</body>
+</html>
