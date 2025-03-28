@@ -6,7 +6,7 @@ import socket
 import struct
 import threading
 import msgpack
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from pymavlink import mavutil
 
 #########################################
@@ -433,6 +433,10 @@ def run_alink_thread(conn):
 
 def run_flask():
     app = Flask(__name__)
+
+    @app.route("/")
+    def index():
+        return send_from_directory("static", "index.html")
 
     @app.route("/parameters", methods=["GET"])
     def get_parameters():
