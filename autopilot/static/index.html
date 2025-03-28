@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MAVLink Parameter Control</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 10px;
+      padding: 0;
+      background-color: #f5f5f5;
+    }
+    h2 {
+      margin-top: 20px;
+      color: #333;
+    }
+    .param-card {
+      background: #fff;
+      border-radius: 5px;
+      padding: 10px;
+      margin-bottom: 10px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .param-card h3 {
+      margin: 0 0 5px;
+      font-size: 1.1em;
+    }
+    .param-card label {
+      display: inline-block;
+      margin-bottom: 5px;
+    }
+    .param-card input[type="number"] {
+      width: 60px;
+      padding: 5px;
+      margin-right: 5px;
+      font-size: 1em;
+    }
+    .param-card button {
+      padding: 5px 10px;
+      margin-right: 5px;
+      border: none;
+      border-radius: 3px;
+      background-color: #007bff;
+      color: #fff;
+      font-size: 1em;
+    }
+    canvas {
+      width: 100%;
+      max-width: 400px;
+      height: 200px;
+      border: 1px solid #ccc;
+      margin-top: 10px;
+      background: #fff;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <h2>MAVLink Parameters</h2>
+  <div id="params"></div>
+
+  <h2>ALINK RSSI Plot (Latest 100)</h2>
+  <canvas id="plot"></canvas>
+
+  <script>
+    // Global dictionary to store created parameter cards.
+    const paramCards = {};
+
+    // Create or update a parameter card for a given parameter.
+    function updateParamCard(paramId, paramData) {
+      const container = document.getElementById('params');
+      let card;
+      if (paramCards[paramId]) {
+        // Card exists; update value if input is not focused.
+        card = paramCards[paramId];
+        const input = card.querySelector('input');
+        if (document.activeElement !== input) {
+          input.value = parseInt(paramData.value);
+        }
+      } else {
+        // Create a new card.
+        card = document.createElement('div');
+        card.className = 'param-card';
+        card.innerHTML = `<h3>${paramId}</h3>
+          <label>Value: <input type="number" id="input-${paramId}" value="${parseInt(paramData.value)}"></label>
+          <button onclick="getParam('${paramId}')">Get</button>
+          <button onclick="setParam('${paramId}')">Set</button>`;
+        container.appendChild(card);
+        paramCards[paramId] = card;
+      }
+    }
+
+    // Fetch parameters from the backend and update/create cards.
+    function fetchParameters() {
+      fetch('/parameters')
+      .then(response => response.json())
+      .then(data => {
+        for (const paramId in data) {
+          updateParamCard(paramId, data[paramId]);
+        }
+      })
+      .catch(error => console.error('Error fetching parameters:', error));
+    }
+
+    function getParam(paramId) {
+      fetch('/parameters/' + paramId)
+      .then(response => response.json())
+      .then(data => {
+        if (data[paramId]) {
+          updateParamCard(paramId, data[paramId]);
+        }
+      })
+      .catch(error => console.error('Error getting parameter:', error));
+    }
+
+    function setParam(paramId) {
+      const input = document.getElementById('input-' + paramId);
+      const value = input.value;
+      fetch('/parameters/' + paramId, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({value: value})
+      })
+      .then(response => response.json())
+      .then(data => {
+        console.log('Parameter updated:', data);
+        fetchParameters();
+      })
+      .catch(error => console.error('Error setting parameter:', error));
+    }
+
+    // --- ALINK RSSI Plot Functions ---
+    let rssiData = []; // stores latest 100 rssi values
+
+    function fetchAlinkStream() {
+      fetch('/alink_stream')
+      .then(response => response.json())
+      .then(data => {
+        if (data.RADIO_STATUS) {
+          rssiData = data.RADIO_STATUS.map(msg => msg.rssi);
+          if (rssiData.length > 100) {
+            rssiData = rssiData.slice(-100);
+          }
+          drawPlot();
+        }
+      })
+      .catch(error => console.error('Error fetching alink stream:', error));
+    }
+
+    function drawPlot() {
+      const canvas = document.getElementById('plot');
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const width = canvas.width;
+      const height = canvas.height;
+      const len = rssiData.length;
+      if (len === 0) return;
+      const maxVal = 254, minVal = 0;
+      const xStep = width / (len - 1);
+      ctx.beginPath();
+      for (let i = 0; i < len; i++) {
+        const x = i * xStep;
+        const y = height - ((rssiData[i] - minVal) / (maxVal - minVal)) * height;
+        if (i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.strokeStyle = '#007bff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    // --- Periodic Refresh ---
+    fetchParameters();
+    setInterval(fetchParameters, 5000);  // refresh parameters every 5 seconds
+    setInterval(fetchAlinkStream, 1000);   // refresh ALINK stream every 1 second
+
+    // --- Handle Canvas Resizing ---
+    window.addEventListener('resize', function(){
+      const canvas = document.getElementById('plot');
+      canvas.width = canvas.offsetWidth;
+      canvas.height = canvas.offsetHeight;
+      drawPlot();
+    });
+    window.dispatchEvent(new Event('resize'));
+  </script>
+</body>
+</html>
