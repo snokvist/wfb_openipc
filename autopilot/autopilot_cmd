@@ -21,7 +21,7 @@ if [ "$1" = "get" ]; then
         VIDEO_BR)
             echo "OK 5000"
             ;;
-        VIDEO_PROFILE)
+        VTX_PROFILE)
             echo "OK 0"
             ;;
         *)
@@ -40,7 +40,7 @@ elif [ "$1" = "set" ]; then
         VIDEO_BR)
             echo "OK $3"
             ;;
-        VIDEO_PROFILE)
+        VTX_PROFILE)
             echo "OK $3"
             ;;
         *)
