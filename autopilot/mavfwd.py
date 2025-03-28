@@ -6,6 +6,7 @@ import socket
 import struct
 import threading
 import msgpack
+import os  # needed for file operations
 from pymavlink import mavutil
 import alink
 import flask_api  # renamed file to avoid conflict with the installed Flask package
@@ -90,9 +91,12 @@ def run_sync_mode(args, shared_state):
         alink_thread = threading.Thread(target=alink.run_alink_thread, args=(hb_conn, shutdown_event, shared_state), daemon=True)
         alink_thread.start()
     last_hb_time = time.time()
+    last_file_check_time = time.time()  # for checking the file every 500ms
     hb_interval = 1.0  # seconds
+    file_check_interval = 0.5  # seconds
     while not shutdown_event.is_set():
         now = time.time()
+        # Send heartbeat every second.
         if now - last_hb_time >= hb_interval:
             hb_conn.mav.heartbeat_send(
                 mavutil.mavlink.MAV_TYPE_GENERIC,
@@ -102,6 +106,30 @@ def run_sync_mode(args, shared_state):
             if args.verbose:
                 print("Heartbeat sent.")
             last_hb_time = now
+
+        # Check every 500ms for a file containing a text message.
+        if now - last_file_check_time >= file_check_interval:
+            try:
+                if os.path.exists("/tmp/message.mavlink"):
+                    with open("/tmp/message.mavlink", "r") as f:
+                        text = f.read().strip()
+                    if text:
+                        # Send STATUSTEXT with severity INFO (6) using the text.
+                        hb_conn.mav.statustext_send(6, text.encode('ascii'))
+                        if args.verbose:
+                            print("STATUSTEXT sent: " + text)
+            except Exception as e:
+                if args.verbose:
+                    print("Error sending STATUSTEXT: ", e)
+            finally:
+                try:
+                    if os.path.exists("/tmp/message.mavlink"):
+                        os.remove("/tmp/message.mavlink")
+                except Exception as e:
+                    if args.verbose:
+                        print("Error deleting /tmp/message.mavlink: ", e)
+            last_file_check_time = now
+
         msg = in_conn.recv_match(blocking=False)
         if msg:
             msg_dict = msg.to_dict()
@@ -140,7 +168,6 @@ def main():
     parser = argparse.ArgumentParser(
         description="Replicate and process MAVLink UDP streams in sync mode with a Flask API."
     )
-    # In sync mode, many normal mode parameters are not needed.
     parser.add_argument('-f', '--forward', type=int, default=None,
                         help="Local UDP port to forward received MAVLink packets (optional).")
     parser.add_argument('-c', '--channels', type=str, default=None,
@@ -155,7 +182,6 @@ def main():
                         help="Display detailed MAVLink packet information (default: off).")
     parser.add_argument('--alink', action='store_true',
                         help="Also connect to the JSON server (ALINK) to fetch Wi-Fi data and send RADIO_STATUS messages.")
-    # Although we no longer use --sync as a flag, we still include it for clarity.
     parser.add_argument('--sync', action='store_true',
                         help="Activate sync mode (the only mode available).")
     args = parser.parse_args()
@@ -164,7 +190,6 @@ def main():
     else:
         args.channels_list = []
     shared_state = SharedState()
-    # Start the Flask API in its own daemon thread.
     flask_thread = threading.Thread(target=flask_api.run_flask, args=(shared_state,), daemon=True)
     flask_thread.start()
     try:
