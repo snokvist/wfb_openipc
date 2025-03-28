@@ -12,9 +12,25 @@
  *    messages and echoes them back every 500ms.
  *  - Checks every 100ms for a file (/tmp/message.mavlink) containing a text
  *    message. If found, sends it as a STATUSTEXT message (appearing in QGC) and deletes the file.
+ *  - Parses incoming STATUSTEXT messages and calls
+ *        /usr/bin/autopilot_cmd statustext "<text>"
  *  - Monitors specified RC channels (via the -C option, e.g. "-C 5,6") – for channels 5–12,
  *    if a change of more than 20 persists for 100ms, a system command is executed
  *    (with a 1000ms minimum delay between triggers) to update the setting.
+ *  - Listens for RADIO_STATUS messages from component 100 (Camera). When received,
+ *    a special text string is created using the mapping below and sent via UDP to
+ *    127.0.0.1:9999 (if -r is specified) and logged to the console (if -v is used).
+ *
+ * Mapping for special RADIO_STATUS string:
+ *   {timestamp}:{link_health_score_rssi}:{link_health_score_snr}:{recovered_packets}:{recovered_packet_count}:{best_antennas_rssi}:{best_antennas_snr}:{best_antennas_snr}:{best_antennas_snr}
+ *
+ *   where:
+ *     - link_health_score_rssi = 999 if rssi == 0, else round((rssi * 1001 / 254) + 999)
+ *     - link_health_score_snr = 999 if noise == 0, else round((noise * 1001 / 254) + 999)
+ *     - best_antennas_rssi = round((remrssi * 256 / 254) - 128)
+ *     - best_antennas_snr = round(remnoise * 50 / 254)
+ *     - recovered_packets = fixed, capped at 254
+ *     - recovered_packet_count = rxerrors, capped at 254
  *
  * Command-line options:
  *   -v             : Increase verbosity (use -v for moderate, -vv for extra verbose)
@@ -25,10 +41,11 @@
  *   -m <custom_mode>: Set the custom mode (default: 0)
  *   -b <base_mode> : Set the base mode (default: 0)
  *   -C <channels>  : Comma-separated list of RC channels to monitor (only channels 5–12 allowed)
+ *   -r             : Enable special handling for RADIO_STATUS messages from component 100 (Camera)
  *
  * Usage examples:
  *   ./advanced_mavlink_autopilot -v -s 1 -c 240 -t 2 -a 3 -m 0 -b 81
- *   ./advanced_mavlink_autopilot -vv -C 5,6
+ *   ./advanced_mavlink_autopilot -vv -C 5,6 -r
  *
  * NOTE: Adjust include paths and message details for your MAVLink dialect.
  */
@@ -45,6 +62,10 @@
 #include <stdbool.h>
 #include <getopt.h>
 #include <sys/stat.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <math.h>
 #include "mavlink/common/mavlink.h"  // Ensure the correct MAVLink dialect header is included
 
 #define SERIAL_PORT "/dev/ttyS2"
@@ -97,6 +118,11 @@ static int monitored_channel_count = 0;
 #define CHANNEL_THRESHOLD 20
 #define CHANNEL_PERSIST_MS 100
 #define CHANNEL_TRIGGER_DELAY_MS 1000
+
+/* UDP globals for RADIO_STATUS from Camera */
+bool enable_radio_camera_udp = false;
+int udp_sock = -1;
+struct sockaddr_in udp_addr;
 
 /* Helper function to compute elapsed ms between two timespecs */
 long elapsed_ms(struct timespec start, struct timespec end) {
@@ -216,7 +242,7 @@ int set_interface_attribs(int fd, int speed) {
 }
 
 void usage(const char *progname) {
-    printf("Usage: %s [-v] [-s system_id] [-c component_id] [-t vehicle_type] [-a autopilot_type] [-m custom_mode] [-b base_mode] [-C channels]\n", progname);
+    printf("Usage: %s [-v] [-s system_id] [-c component_id] [-t vehicle_type] [-a autopilot_type] [-m custom_mode] [-b base_mode] [-C channels] [-r]\n", progname);
 }
 
 int main(int argc, char *argv[]) {
@@ -228,12 +254,12 @@ int main(int argc, char *argv[]) {
     uint32_t custom_mode = 0;
     uint8_t base_mode = 0;
     char *channels_arg = NULL;
+    bool radio_camera_flag = false;
 
     int opt;
-    while ((opt = getopt(argc, argv, "v:s:c:t:a:m:b:C:")) != -1) {
+    while ((opt = getopt(argc, argv, "v:s:c:t:a:m:b:C:r")) != -1) {
         switch (opt) {
             case 'v': {
-                /* Count one v plus any additional v's concatenated */
                 verbosity++;
                 char *arg = argv[optind - 1];
                 if (arg[0] == '-' && arg[1] == 'v') {
@@ -265,6 +291,9 @@ int main(int argc, char *argv[]) {
             case 'C':
                 channels_arg = strdup(optarg);
                 break;
+            case 'r':
+                radio_camera_flag = true;
+                break;
             default:
                 usage(argv[0]);
                 exit(EXIT_FAILURE);
@@ -290,6 +319,25 @@ int main(int argc, char *argv[]) {
             token = strtok(NULL, ",");
         }
         free(channels_arg);
+    }
+
+    /* If radio-camera flag is set, initialize UDP socket */
+    if (radio_camera_flag) {
+        udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (udp_sock < 0) {
+            perror("UDP socket");
+            radio_camera_flag = false;
+        } else {
+            memset(&udp_addr, 0, sizeof(udp_addr));
+            udp_addr.sin_family = AF_INET;
+            udp_addr.sin_port = htons(9999);
+            if (inet_pton(AF_INET, "127.0.0.1", &udp_addr.sin_addr) <= 0) {
+                perror("inet_pton");
+                radio_camera_flag = false;
+            } else {
+                enable_radio_camera_udp = true;
+            }
+        }
     }
 
     signal(SIGINT, signal_handler);
@@ -327,6 +375,9 @@ int main(int argc, char *argv[]) {
                 printf("%d ", monitored_channels[i].channel);
             }
             printf("\n");
+        }
+        if (enable_radio_camera_udp) {
+            printf("  RADIO_STATUS UDP output enabled (to 127.0.0.1:9999)\n");
         }
     }
 
@@ -440,19 +491,87 @@ int main(int argc, char *argv[]) {
                             }
                             break;
                         }
-                        case MAVLINK_MSG_ID_RC_CHANNELS_OVERRIDE: {
-                            mavlink_msg_rc_channels_override_decode(&msg, &last_rc_channels);
-                            last_rc_channels_valid = true;
+                        case MAVLINK_MSG_ID_STATUSTEXT: {
+                            mavlink_statustext_t statustext;
+                            mavlink_msg_statustext_decode(&msg, &statustext);
+                            char statustext_str[STATUSTEXT_MAX_LEN + 1];
+                            strncpy(statustext_str, statustext.text, STATUSTEXT_MAX_LEN);
+                            statustext_str[STATUSTEXT_MAX_LEN] = '\0';
+                            char cmd[256], output[256];
+                            snprintf(cmd, sizeof(cmd), "/usr/bin/autopilot_cmd statustext \"%s\"", statustext_str);
+                            FILE *fp = popen(cmd, "r");
+                            if (fp) {
+                                if (fgets(output, sizeof(output), fp) != NULL) {
+                                    if (verbosity >= 1) {
+                                        printf("Processed STATUSTEXT via autopilot_cmd: %s\n", output);
+                                    }
+                                } else {
+                                    if (verbosity >= 1) {
+                                        printf("No output from command: %s\n", cmd);
+                                    }
+                                }
+                                pclose(fp);
+                            } else {
+                                if (verbosity >= 1) {
+                                    printf("Failed to execute command: %s\n", cmd);
+                                }
+                            }
                             break;
                         }
                         case MAVLINK_MSG_ID_RADIO_STATUS: {
-                            mavlink_msg_radio_status_decode(&msg, &last_radio_status);
+                            mavlink_radio_status_t radio_status;
+                            mavlink_msg_radio_status_decode(&msg, &radio_status);
+                            /* If component id is 100 (Camera) and UDP output is enabled,
+                               create a special text string and send it over UDP */
+                            if (msg.compid == 100 && enable_radio_camera_udp) {
+                                struct timespec ts;
+                                clock_gettime(CLOCK_MONOTONIC, &ts);
+                                long timestamp = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+                                int link_health_score_rssi;
+                                if (radio_status.rssi == 0)
+                                    link_health_score_rssi = 999;
+                                else
+                                    link_health_score_rssi = (int)round((radio_status.rssi * 1001.0 / 254.0) + 999);
+                                int link_health_score_snr;
+                                if (radio_status.noise == 0)
+                                    link_health_score_snr = 999;
+                                else
+                                    link_health_score_snr = (int)round((radio_status.noise * 1001.0 / 254.0) + 999);
+                                int best_antennas_rssi = (int)round((radio_status.remrssi * 256.0 / 254.0) - 128);
+                                int best_antennas_snr = (int)round(radio_status.remnoise * 50.0 / 254.0);
+                                int recovered_packets = (radio_status.fixed > 254 ? 254 : radio_status.fixed);
+                                int recovered_packet_count = (radio_status.rxerrors > 254 ? 254 : radio_status.rxerrors);
+                                char special_str[256];
+                                snprintf(special_str, sizeof(special_str),
+                                         "%ld:%d:%d:%d:%d:%d:%d:%d:%d",
+                                         timestamp,
+                                         link_health_score_rssi,
+                                         link_health_score_snr,
+                                         recovered_packets,
+                                         recovered_packet_count,
+                                         best_antennas_rssi,
+                                         best_antennas_snr,
+                                         best_antennas_snr,
+                                         best_antennas_snr);
+                                sendto(udp_sock, special_str, strlen(special_str), 0,
+                                       (struct sockaddr*)&udp_addr, sizeof(udp_addr));
+                                if (verbosity >= 1) {
+                                    printf("UDP Special RADIO_STATUS: %s\n", special_str);
+                                }
+                            }
+                            /* In all cases, store the radio status for echoing */
+                            last_radio_status = radio_status;
                             last_radio_status_valid = true;
                             break;
                         }
                         case MAVLINK_MSG_ID_RAW_IMU: {
                             mavlink_msg_raw_imu_decode(&msg, &last_raw_imu);
                             last_raw_imu_valid = true;
+                            break;
+                        }
+                        case MAVLINK_MSG_ID_RC_CHANNELS_OVERRIDE: {
+                            mavlink_msg_rc_channels_override_decode(&msg, &last_rc_channels);
+                            last_rc_channels_valid = true;
                             break;
                         }
                         default:
@@ -630,5 +749,8 @@ int main(int argc, char *argv[]) {
     }
 
     close(serial_fd);
+    if (udp_sock >= 0) {
+        close(udp_sock);
+    }
     return 0;
 }
