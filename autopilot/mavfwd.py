@@ -1,182 +1,99 @@
-#!/usr/bin/env python
-
+#!/usr/bin/env python3
 import argparse
 import time
 import subprocess
 import socket
 import struct
 import threading
-from pymavlink import mavutil
 import msgpack
+from flask import Flask, jsonify, request
+from pymavlink import mavutil
 
-# --- Global variables used by the WiFi thread ---
-# These globals are updated by calculate_link_health (you can tune or change the logic as needed)
-link_health_score_rssi = 1000
-link_health_score_snr = 1000
-best_antennas_rssi = [-105, -105, -105, -105]
-best_antennas_snr = [-105, -105, -105, -105]
+#########################################
+# Global Variables, Locks, and Shutdown Event
+#########################################
 
-# --- Functions from your WiFi code (extracted parts) ---
+# Global MAVLink connection used for heartbeat/parameter commands.
+dest_mav_conn = None
 
-def calculate_link_health(video_rx):
-    """
-    Calculate link health from the JSON (msgpack) data.
-    This function extracts RSSI/SNR info from the received dictionary.
-    """
-    global link_health_score_rssi, link_health_score_snr, best_antennas_rssi, best_antennas_snr
-    try:
-        # Example: assume video_rx contains a dict "rx_ant_stats" with antenna measurements.
-        rx_ant_stats = video_rx.get('rx_ant_stats', {})
-        rssi_values = []
-        snr_values = []
-        if rx_ant_stats:
-            for antenna in rx_ant_stats.values():
-                if len(antenna) >= 6:
-                    rssi_values.append(antenna[2])
-                    snr_values.append(antenna[5])
-            rssi_values.sort(reverse=True)
-            snr_values.sort(reverse=True)
-            best_antennas_rssi = rssi_values[:4] if rssi_values else [-105]*4
-            best_antennas_snr = snr_values[:4] if snr_values else [-105]*4
-            # Simple linear mapping example:
-            rssi_to_use = best_antennas_rssi[0]
-            # Map from a range (e.g., -80 to -30) to a score between 1000 and 2000.
-            if rssi_to_use < -80:
-                link_health_score_rssi = 1000
-            elif rssi_to_use > -30:
-                link_health_score_rssi = 2000
-            else:
-                link_health_score_rssi = 1000 + ((rssi_to_use + 80) / 50) * 1000
-            # Similar for SNR (assume range 12 to 38)
-            snr_to_use = best_antennas_snr[0]
-            if snr_to_use < 12:
-                link_health_score_snr = 1000
-            elif snr_to_use > 38:
-                link_health_score_snr = 2000
-            else:
-                link_health_score_snr = 1000 + ((snr_to_use - 12) / 26) * 1000
-        else:
-            link_health_score_rssi = 1000
-            link_health_score_snr = 1000
-    except Exception as e:
-        print(f"[WiFi Data] Error in calculate_link_health: {e}")
-        link_health_score_rssi = 1000
-        link_health_score_snr = 1000
-    return link_health_score_rssi, link_health_score_snr
+# Dictionary holding available parameters (populated from PARAM_VALUE messages).
+available_params = {}
+params_lock = threading.Lock()
 
-def send_radio_status_via_conn(hb_conn, rssi, snr, recovered_packets):
-    """
-    Build and send a RADIO_STATUS message over the given MAVLink connection.
-    The mapping here is similar to your original function.
-    """
-    def convert_health(x):
-        if x == 999:
-            return 0
-        return int(round((x - 999) * 254 / 1001))  # (2000 - 999) = 1001
+# List holding a history (max 300) of received MAVLink messages.
+streaming_history = []
+# Dictionary keyed by MAVLink type, each holding a list of messages (max 300 each).
+history_by_type = {}
 
-    rssi_value = convert_health(rssi)
-    noise_value = convert_health(snr)
-    # Map best antenna RSSI (assumed in range -128 to 128) to 0-254
-    rem_rssi = int(round((best_antennas_rssi[0] + 128) * 254 / 256))
-    # Map best antenna SNR (assumed in range 0 to 50) to 0-254
-    rem_snr_raw = best_antennas_snr[0]
-    if rem_snr_raw < 0:
-        rem_snr_raw = 0
-    elif rem_snr_raw > 50:
-        rem_snr_raw = 50
-    rem_noise = int(round(rem_snr_raw * 254 / 50))
-    fixed = min(recovered_packets, 254)
-    rxerrors = fixed  # For simplicity
-    hb_conn.mav.radio_status_send(rssi_value, rem_rssi, 0, noise_value, rem_noise, rxerrors, fixed)
-    print(f"[WiFi Data] Sent RADIO_STATUS: rssi={rssi_value}, rem_rssi={rem_rssi}, noise={noise_value}, rem_noise={rem_noise}, rxerrors={rxerrors}, fixed={fixed}")
+# Global dictionary holding ALINK sent messages (RADIO_STATUS only).
+alink_sent_history = {}
 
-def send_statustext(hb_conn, message):
-    """
-    Send a STATUSTEXT message with the given message string.
-    """
-    # MAVLink STATUSTEXT messages typically have a maximum of 50 characters.
-    message = message[:50]
-    hb_conn.mav.statustext_send(mavutil.mavlink.MAV_SEVERITY_INFO, message.encode('ascii', errors='replace'))
-    print(f"[WiFi Data] Sent STATUSTEXT: {message}")
+# Lock for histories.
+history_lock = threading.Lock()
 
-def wifi_data_thread(hb_conn):
-    """
-    Connect to the JSON (msgpack) server to get WiFi connection data,
-    calculate link health, and send RADIO_STATUS and STATUSTEXT messages
-    to the autopilot.
-    
-    This function runs in its own thread.
-    """
-    json_host = "127.0.0.1"   # Set these as needed
-    json_port = 8003
-    retry_interval = 1  # seconds
-    while True:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
-                print(f"[WiFi Data] Connecting to {json_host}:{json_port}...")
-                client_socket.connect((json_host, json_port))
-                print(f"[WiFi Data] Connected to {json_host}:{json_port}")
-                while True:
-                    length_prefix = client_socket.recv(4)
-                    if not length_prefix:
-                        print("[WiFi Data] Connection closed by server.")
-                        break
-                    msg_length = struct.unpack('!I', length_prefix)[0]
-                    data = b""
-                    while len(data) < msg_length:
-                        chunk = client_socket.recv(min(4096, msg_length - len(data)))
-                        if not chunk:
-                            break
-                        data += chunk
-                    if len(data) == msg_length:
-                        try:
-                            unpacked_data = msgpack.unpackb(data, use_list=False, strict_map_key=False)
-                            # For example, if the data type is "rx" with id "video rx":
-                            if unpacked_data.get("type") == "rx" and unpacked_data.get("id") == "video rx":
-                                rssi, snr = calculate_link_health(unpacked_data)
-                                fec_rec = unpacked_data.get("packets", {}).get("fec_rec", [0, 0])
-                                recovered_pkt = fec_rec[0] if fec_rec else 0
-                                send_radio_status_via_conn(hb_conn, rssi, snr, recovered_pkt)
-                            # Send any special messages as STATUSTEXT:
-                            if "special_request" in unpacked_data:
-                                special_message = f"special:{unpacked_data['special_request']}"
-                                send_statustext(hb_conn, special_message)
-                        except Exception as e:
-                            print(f"[WiFi Data] Error unpacking data: {e}")
-                    else:
-                        print("[WiFi Data] Incomplete data received.")
-                        break
-        except Exception as e:
-            print(f"[WiFi Data] Connection error: {e}. Retrying in {retry_interval} seconds...")
-            time.sleep(retry_interval)
+# Global shutdown event to signal threads to exit gracefully.
+shutdown_event = threading.Event()
 
-# --- End of WiFi data functions ---
+#########################################
+# Helper Functions for History Logging
+#########################################
 
+def add_to_history(msg_dict):
+    """Append a message dictionary to the streaming history (max 300 items)
+       and also add it to a type-indexed dictionary, with an added timestamp."""
+    msg_dict['timestamp'] = time.time()
+    with history_lock:
+        streaming_history.append(msg_dict)
+        if len(streaming_history) > 300:
+            streaming_history.pop(0)
+        mtype = msg_dict.get("mavpackettype", "unknown")
+        if mtype not in history_by_type:
+            history_by_type[mtype] = []
+        history_by_type[mtype].append(msg_dict)
+        if len(history_by_type[mtype]) > 300:
+            history_by_type[mtype].pop(0)
 
-# --- Existing sync-mode and normal-mode functions ---
+def add_to_alink_sent_history(msg_dict):
+    """Append a sent ALINK message (RADIO_STATUS) to the alink_sent_history (max 300 items),
+       with an added timestamp."""
+    msg_dict['timestamp'] = time.time()
+    with history_lock:
+        if 'RADIO_STATUS' not in alink_sent_history:
+            alink_sent_history['RADIO_STATUS'] = []
+        alink_sent_history['RADIO_STATUS'].append(msg_dict)
+        if len(alink_sent_history['RADIO_STATUS']) > 300:
+            alink_sent_history['RADIO_STATUS'].pop(0)
+
+#########################################
+# Core Functionality (Heartbeat, RC, etc.)
+#########################################
+
+def parse_channels(channels_str):
+    """Parse a comma-separated list of channel numbers into a list of ints."""
+    return [int(ch.strip()) for ch in channels_str.split(',') if ch.strip()]
+
+#########################################
+# SYNC MODE and MANUAL MODE Functions
+#########################################
 
 def run_sync_mode(args):
     """
     Sync mode:
       - Listen on UDP port 14550 for an ELRS backpack broadcast.
       - Extract the source IP and source port from the first received packet.
-      - Print the packet in verbose mode.
-      - Exit sync mode and transition to a heartbeat/parameter request mode:
-          * Incoming port is forced to 14550.
-          * Outgoing heartbeats (and parameter requests) are sent to the extracted remote IP and port.
-          * Immediately request the parameter list.
-          * For each received PARAM_VALUE, print the parameter and, once, request a read.
-          * Optionally forward received packets if --forward is provided.
-          * If --alink is specified, start a separate thread to send WiFi data messages.
+      - Create a heartbeat/parameter connection to that destination.
+      - Immediately request the parameter list.
+      - If --alink is specified, start the ALINK thread.
+      - Incoming messages update available_params and are added to streaming_history.
     """
+    global dest_mav_conn
+
     print("Entering sync mode: Listening for MAVLink packets on UDP port 14550 (ELRS backpack broadcast)...")
-    # Bind a raw UDP socket to capture the sender's address.
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(('0.0.0.0', 14550))
     data, addr = sock.recvfrom(2048)
     remote_ip, remote_port = addr
 
-    # Attempt to decode the MAVLink message for logging purposes.
     mav_temp = mavutil.mavlink.MAVLink(None)
     try:
         msg = mav_temp.decode(data)
@@ -195,12 +112,12 @@ def run_sync_mode(args):
     print("Exiting sync mode. Transitioning to ELRS normal mode (heartbeat + parameter request).")
     sock.close()
 
-    # Set up incoming connection on forced port 14550.
+    # Create incoming connection on port 14550.
     in_conn = mavutil.mavlink_connection('udpin:0.0.0.0:14550')
-    # Outgoing connection: use the extracted remote IP and port.
+    # Create outgoing connection using the extracted remote IP and port.
     hb_conn = mavutil.mavlink_connection(f'udpout:{remote_ip}:{remote_port}')
+    dest_mav_conn = hb_conn  # For Flask endpoint usage
 
-    # Optionally, set up a forwarding connection.
     forward_conn = None
     if args.forward is not None:
         forward_conn = mavutil.mavlink_connection(f'udpout:127.0.0.1:{args.forward}')
@@ -208,21 +125,19 @@ def run_sync_mode(args):
     print(f"ELRS normal mode: Listening on port 14550 and sending heartbeats to {remote_ip}:{remote_port}" +
           (f", and forwarding to port {args.forward}" if forward_conn else ""))
 
-    # Immediately request the parameter list.
     print("Requesting parameter list...")
     hb_conn.mav.param_request_list_send(1, 1)
     param_requested = {}
 
-    # If --alink is provided, start the WiFi data thread.
     if args.alink:
-        wifi_thread = threading.Thread(target=wifi_data_thread, args=(hb_conn,), daemon=True)
-        wifi_thread.start()
-        print("Started WiFi data thread (--alink enabled).")
+        print("Starting ALINK thread to fetch Wi-Fi data and send RADIO_STATUS messages...")
+        alink_thread = threading.Thread(target=run_alink_thread, args=(hb_conn,), daemon=True)
+        alink_thread.start()
 
     last_hb_time = time.time()
-    hb_interval = 1.0  # heartbeat interval in seconds
+    hb_interval = 1.0  # seconds
 
-    while True:
+    while not shutdown_event.is_set():
         now = time.time()
         if now - last_hb_time >= hb_interval:
             hb_conn.mav.heartbeat_send(
@@ -236,14 +151,23 @@ def run_sync_mode(args):
 
         msg = in_conn.recv_match(blocking=False)
         if msg:
+            msg_dict = msg.to_dict()
+            add_to_history(msg_dict)
             if args.verbose:
-                print(f"Received message: {msg.to_dict()}")
+                print(f"Received message: {msg_dict}")
             if msg.get_type() == "PARAM_VALUE":
                 if isinstance(msg.param_id, bytes):
                     param_id = msg.param_id.decode('utf-8').strip('\x00')
                 else:
                     param_id = msg.param_id.strip('\x00')
                 print(f"Parameter received: {param_id} = {msg.param_value}")
+                with params_lock:
+                    available_params[param_id] = {
+                        "value": msg.param_value,
+                        "type": msg.param_type,
+                        "index": msg.param_index,
+                        "count": msg.param_count
+                    }
                 if param_id not in param_requested:
                     print(f"Requesting read for parameter {param_id}...")
                     param_id_bytes = param_id.encode('ascii')
@@ -255,21 +179,24 @@ def run_sync_mode(args):
         else:
             time.sleep(0.01)
 
+    print("Shutdown signal received in sync mode. Exiting run_sync_mode.")
+
 def run_normal_mode(args):
     """
     Manual mode:
-      - Listen on the user-provided --in port.
-      - Set up a heartbeat connection to the remote target specified by --target and --out.
-      - Optionally forward every received MAVLink packet to --forward.
-      - Process RC_CHANNELS_OVERRIDE messages if --channels is provided.
+      - Listen on the user-specified --in port.
+      - Set up a heartbeat connection to the remote target (using --target and --out).
+      - Process incoming MAVLink messages (updating history and parameters) and forward if requested.
+      - Also process RC_CHANNELS_OVERRIDE messages.
     """
+    global dest_mav_conn
     if args.out is None:
         print("Error: In manual mode, --out must be provided for the bidirectional connection.")
         return
 
     in_conn = mavutil.mavlink_connection(f'udpin:0.0.0.0:{args.in_port}')
     hb_conn = mavutil.mavlink_connection(f'udpout:{args.target}:{args.out}')
-
+    dest_mav_conn = hb_conn
     forward_conn = None
     if args.forward is not None:
         forward_conn = mavutil.mavlink_connection(f'udpout:127.0.0.1:{args.forward}')
@@ -277,11 +204,15 @@ def run_normal_mode(args):
     print(f"Manual mode: Listening on UDP port {args.in_port}, sending heartbeats to {args.target}:{args.out}" +
           (f", and forwarding to port {args.forward}" if forward_conn else ""))
 
-    # (RC channel processing code would go here if needed.)
+    channel_state = {}
+    wait_seconds = args.wait / 1000.0
+    persist_seconds = args.persist / 1000.0
+    tolerance_ratio = args.tolerance / 100.0
+
     last_hb_time = time.time()
     hb_interval = 1.0
 
-    while True:
+    while not shutdown_event.is_set():
         now = time.time()
         if now - last_hb_time >= hb_interval:
             hb_conn.mav.heartbeat_send(
@@ -292,21 +223,275 @@ def run_normal_mode(args):
             if args.verbose:
                 print("Heartbeat sent.")
             last_hb_time = now
+
         msg = in_conn.recv_match(blocking=False)
         if msg:
+            msg_dict = msg.to_dict()
+            add_to_history(msg_dict)
             if args.verbose:
-                print(f"Received message: {msg.to_dict()}")
+                print(f"Received message: {msg_dict}")
+                print("Full message details:")
+                print(msg.to_dict())
             if forward_conn:
                 raw_msg = msg.get_msgbuf()
                 forward_conn.write(raw_msg)
+            if args.channels and msg.get_type() == 'RC_CHANNELS_OVERRIDE':
+                for ch in args.channels_list:
+                    attr_name = f'chan{ch}_raw'
+                    if not hasattr(msg, attr_name):
+                        continue
+                    value = getattr(msg, attr_name)
+                    now = time.time()
+                    if ch not in channel_state:
+                        channel_state[ch] = {
+                            "candidate": value,
+                            "stable_since": now,
+                            "last_triggered_value": value,
+                            "last_executed": 0
+                        }
+                        continue
+                    state = channel_state[ch]
+                    if abs(value - state["candidate"]) <= tolerance_ratio * state["candidate"]:
+                        if (now - state["stable_since"] >= persist_seconds) and (now - state["last_executed"] >= wait_seconds):
+                            if abs(value - state["last_triggered_value"]) > tolerance_ratio * state["last_triggered_value"]:
+                                cmd = ["/usr/bin/channels.sh", str(ch), str(value)]
+                                subprocess.Popen(cmd)
+                                state["last_triggered_value"] = value
+                                state["last_executed"] = now
+                    else:
+                        state["candidate"] = value
+                        state["stable_since"] = now
         else:
             time.sleep(0.01)
 
+    print("Shutdown signal received in manual mode. Exiting run_normal_mode.")
+
+#########################################
+# ALINK (Wi-Fi/JSON) Functions (used only when --alink is set in sync mode)
+#########################################
+
+# Hard-coded ALINK connection settings.
+ALINK_HOST = "127.0.0.1"
+ALINK_PORT = 8003
+ALINK_RETRY_INTERVAL = 1      # seconds
+ALINK_MESSAGE_INTERVAL = 0.1  # seconds
+ACCUMULATOR_PERIOD = 1.0      # seconds
+
+# Global variables for ALINK processing.
+alink_recovered_packets_accumulator = 0
+alink_last_accumulator_reset = time.time()
+alink_best_antennas_rssi = [-105, -105, -105, -105]
+alink_best_antennas_snr = [-105, -105, -105, -105]
+alink_link_health_score_rssi = 1000
+alink_link_health_score_snr = 1000
+
+def update_alink_recovered(new_val):
+    global alink_recovered_packets_accumulator
+    alink_recovered_packets_accumulator += new_val
+
+def calculate_alink_link_health(video_rx):
+    """
+    Recalculate link health from JSON/msgpack data using hard-coded parameters.
+    """
+    global alink_link_health_score_rssi, alink_link_health_score_snr, alink_best_antennas_rssi, alink_best_antennas_snr
+    try:
+        use_best_rssi = True
+        min_rssi = -80.0
+        max_rssi = -30.0
+        min_snr = 12.0
+        max_snr = 38.0
+
+        packets = video_rx.get('packets', {})
+        fec_rec = packets.get('fec_rec', [0, 0])
+        recovered = fec_rec[0]
+        update_alink_recovered(recovered)
+        rx_ant_stats = video_rx.get('rx_ant_stats', {})
+        rssi_values = []
+        snr_values = []
+        for antenna in rx_ant_stats.values():
+            if len(antenna) >= 6:
+                rssi_values.append(antenna[2])
+                snr_values.append(antenna[5])
+        if not rssi_values or not snr_values:
+            alink_link_health_score_rssi = 1000
+            alink_link_health_score_snr = 1000
+            alink_best_antennas_rssi = [-105, -105, -105, -105]
+            alink_best_antennas_snr = [-105, -105, -105, -105]
+            return alink_link_health_score_rssi, alink_link_health_score_snr
+
+        rssi_values.sort(reverse=True)
+        snr_values.sort(reverse=True)
+        alink_best_antennas_rssi = rssi_values[:4] + [-105]*(4 - len(rssi_values))
+        alink_best_antennas_snr = snr_values[:4] + [-105]*(4 - len(snr_values))
+        rssi_to_use = alink_best_antennas_rssi[0] if use_best_rssi else sum(alink_best_antennas_rssi)/4.0
+        if rssi_to_use > max_rssi:
+            alink_link_health_score_rssi = 2000
+        elif rssi_to_use < min_rssi:
+            alink_link_health_score_rssi = 1000
+        else:
+            alink_link_health_score_rssi = 1000 + ((rssi_to_use - min_rssi)/(max_rssi - min_rssi))*1000
+
+        avg_snr = alink_best_antennas_snr[0] if use_best_rssi else sum(alink_best_antennas_snr)/4.0
+        if avg_snr > max_snr:
+            alink_link_health_score_snr = 2000
+        elif avg_snr < min_snr:
+            alink_link_health_score_snr = 1000
+        else:
+            alink_link_health_score_snr = 1000 + ((avg_snr - min_snr)/(max_snr - min_snr))*1000
+
+        alink_link_health_score_rssi = round(alink_link_health_score_rssi)
+        alink_link_health_score_snr = round(alink_link_health_score_snr)
+        return alink_link_health_score_rssi, alink_link_health_score_snr
+
+    except Exception as e:
+        print(f"ALINK: Error calculating link health: {e}, data: {video_rx}")
+        return 1000, 1000
+
+def send_radio_status_alink(conn, recovered_packet_count):
+    """
+    Constructs and sends a MAVLink RADIO_STATUS message based on ALINK link health data.
+    Uses the local recovered_packet_count for both fixed and rxerrors.
+    Also logs the sent message in alink_sent_history.
+    """
+    def convert_health(x):
+        return 0 if x == 999 else int(round((x - 999) * 254 / 1001))
+    rssi_value = convert_health(alink_link_health_score_rssi)
+    noise_value = convert_health(alink_link_health_score_snr)
+    rem_rssi = int(round((alink_best_antennas_rssi[0] + 128) * 254 / 256))
+    rem_snr = alink_best_antennas_snr[0]
+    if rem_snr < 0:
+        rem_snr = 0
+    elif rem_snr > 50:
+        rem_snr = 50
+    rem_noise = int(round(rem_snr * 254 / 50))
+    fixed = min(recovered_packet_count, 254)
+    rxerrors = min(recovered_packet_count, 254)
+    conn.mav.radio_status_send(rssi_value, rem_rssi, 0, noise_value, rem_noise, rxerrors, fixed)
+    print(f"ALINK: Sent RADIO_STATUS: rssi={rssi_value}, rem_rssi={rem_rssi}, noise={noise_value}, rem_noise={rem_noise}, rxerrors={rxerrors}, fixed={fixed}")
+    
+    msg_dict = {
+         "mavpackettype": "RADIO_STATUS",
+         "rssi": rssi_value,
+         "remrssi": rem_rssi,
+         "noise": noise_value,
+         "remnoise": rem_noise,
+         "rxerrors": rxerrors,
+         "fixed": fixed,
+         "source": "alink"
+    }
+    add_to_alink_sent_history(msg_dict)
+
+def run_alink_thread(conn):
+    """
+    Connects to the ALINK JSON/msgpack server, fetches Wi-Fi link data,
+    recalculates link health, and sends a RADIO_STATUS message via the provided MAVLink connection.
+    """
+    global alink_recovered_packets_accumulator, alink_last_accumulator_reset
+    while not shutdown_event.is_set():
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
+                print(f"ALINK: Connecting to {ALINK_HOST}:{ALINK_PORT}...")
+                client_socket.connect((ALINK_HOST, ALINK_PORT))
+                print(f"ALINK: Connected to {ALINK_HOST}:{ALINK_PORT}.")
+                while not shutdown_event.is_set():
+                    length_prefix = client_socket.recv(4)
+                    if not length_prefix:
+                        print("ALINK: Connection closed by server.")
+                        break
+                    msg_length = struct.unpack('!I', length_prefix)[0]
+                    data = b""
+                    while len(data) < msg_length:
+                        chunk = client_socket.recv(min(4096, msg_length - len(data)))
+                        if not chunk:
+                            break
+                        data += chunk
+                    if len(data) == msg_length:
+                        try:
+                            unpacked = msgpack.unpackb(data, use_list=False, strict_map_key=False)
+                        except Exception as e:
+                            print(f"ALINK: Failed to unpack data: {e}")
+                            continue
+                        if unpacked.get("type") == "rx" and unpacked.get("id") == "video rx":
+                            calculate_alink_link_health(unpacked)
+                            now = time.time()
+                            if now - alink_last_accumulator_reset >= ACCUMULATOR_PERIOD:
+                                recovered_packet_count = alink_recovered_packets_accumulator
+                                alink_recovered_packets_accumulator = 0
+                                alink_last_accumulator_reset = now
+                            else:
+                                recovered_packet_count = alink_recovered_packets_accumulator
+                            send_radio_status_alink(conn, recovered_packet_count)
+                    time.sleep(ALINK_MESSAGE_INTERVAL)
+        except Exception as e:
+            print(f"ALINK: Connection failed or lost: {e}. Retrying in {ALINK_RETRY_INTERVAL} seconds...")
+            time.sleep(ALINK_RETRY_INTERVAL)
+    print("Shutdown signal received in ALINK thread. Exiting run_alink_thread.")
+
+#########################################
+# Flask Web API (runs in its own thread)
+#########################################
+
+def run_flask():
+    app = Flask(__name__)
+
+    @app.route("/parameters", methods=["GET"])
+    def get_parameters():
+        with params_lock:
+            return jsonify(available_params)
+
+    @app.route("/parameters/<param_id>", methods=["GET"])
+    def get_parameter(param_id):
+        with params_lock:
+            param = available_params.get(param_id)
+        if param is None:
+            return jsonify({"error": "Parameter not found"}), 404
+        return jsonify({param_id: param})
+
+    @app.route("/parameters/<param_id>", methods=["POST"])
+    def set_parameter(param_id):
+        if not request.json or "value" not in request.json:
+            return jsonify({"error": "Missing new value in request"}), 400
+        new_value = request.json["value"]
+        with params_lock:
+            param = available_params.get(param_id)
+            if param is None:
+                return jsonify({"error": "Parameter not found"}), 404
+            param["value"] = new_value
+            available_params[param_id] = param
+        global dest_mav_conn
+        if dest_mav_conn is None:
+            return jsonify({"error": "No MAVLink connection available"}), 500
+        try:
+            dest_mav_conn.mav.param_set_send(1, 1, param_id.encode('ascii'), float(new_value), param["type"])
+        except Exception as e:
+            return jsonify({"error": f"Failed to send PARAM_SET: {e}"}), 500
+        return jsonify({"status": "Parameter updated", param_id: param})
+
+    @app.route("/stream", methods=["GET"])
+    def get_stream():
+        msg_type = request.args.get("type")
+        with history_lock:
+            if msg_type:
+                return jsonify(history_by_type.get(msg_type, []))
+            else:
+                return jsonify(streaming_history)
+
+    @app.route("/alink_stream", methods=["GET"])
+    def get_alink_stream():
+        with history_lock:
+            return jsonify(alink_sent_history)
+
+    # Run Flask in threaded mode without reloader.
+    app.run(host="0.0.0.0", port=5000, threaded=True, use_reloader=False)
+
+#########################################
+# Main Entry Point and Argument Parsing
+#########################################
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Replicate and process MAVLink UDP streams with multiple modes."
+        description="Replicate and process MAVLink UDP streams with multiple modes and a Flask API."
     )
-    # Manual mode arguments.
     parser.add_argument('-i', '--in', dest='in_port', type=int, default=14600,
                         help="Local UDP port to listen for MAVLink messages (manual mode).")
     parser.add_argument('-o', '--out', type=int, default=None,
@@ -317,7 +502,8 @@ def main():
     parser.add_argument('-f', '--forward', type=int, default=None,
                         help="Local UDP port to forward received MAVLink packets (optional, works in both modes).")
     parser.add_argument('-c', '--channels', type=str, default=None,
-                        help="RC channels to monitor (comma-separated list, e.g., '5,6,7'). If not provided, RC channel logic is skipped.")
+                        help=("RC channels to monitor (comma-separated list, e.g., '5,6,7'). "
+                              "If not provided, RC channel logic is skipped."))
     parser.add_argument('-w', '--wait', type=int, default=2000,
                         help="Delay in milliseconds after each command execution (default: 2000).")
     parser.add_argument('-p', '--persist', type=int, default=0,
@@ -326,24 +512,38 @@ def main():
                         help="Tolerance percentage for value stability (default: 3.0%%).")
     parser.add_argument('-v', '--verbose', action='store_true',
                         help="Display detailed MAVLink packet information (default: off).")
-    # Sync mode argument.
     parser.add_argument('--sync', action='store_true',
                         help="Activate sync mode: listen on UDP port 14550 for an ELRS broadcast. "
-                             "When a packet is received, use its source IP and source port for heartbeat transmission, "
-                             "parameter requests, and (if --alink is provided) WiFi data messages.")
-    # Optional alink argument for WiFi data integration in sync mode.
+                             "In sync mode, --out is ignored and destination is derived from the sync packet.")
     parser.add_argument('--alink', action='store_true',
-                        help="Enable WiFi data integration: connect to the JSON server and send MAVLink RADIO_STATUS and STATUSTEXT messages.")
+                        help="In sync mode, also connect to the JSON server (ALINK) to fetch Wi-Fi data and send RADIO_STATUS messages.")
 
     args = parser.parse_args()
-
-    if args.sync:
-        run_sync_mode(args)
+    if args.channels is not None:
+        args.channels_list = parse_channels(args.channels)
     else:
-        run_normal_mode(args)
+        args.channels_list = []
+
+    # Start the Flask API in its own daemon thread.
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    try:
+        if args.sync:
+            run_sync_mode(args)
+        else:
+            run_normal_mode(args)
+    except KeyboardInterrupt:
+        print("KeyboardInterrupt received in main thread.")
+    finally:
+        shutdown_event.set()
+        print("Shutdown event set. Waiting for threads to exit...")
+        time.sleep(1)
+        print("Exiting main.")
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("Exiting...")
+        shutdown_event.set()
+        print("Exiting due to KeyboardInterrupt.")
