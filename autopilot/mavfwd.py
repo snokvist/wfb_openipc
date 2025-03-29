@@ -6,10 +6,10 @@ import socket
 import struct
 import threading
 import msgpack
-import os  # needed for file operations
 from pymavlink import mavutil
 import alink
 import flask_api  # renamed file to avoid conflict with the installed Flask package
+import os
 
 # Shared state class to hold all global data shared between modules.
 class SharedState:
@@ -90,13 +90,14 @@ def run_sync_mode(args, shared_state):
         print("Starting ALINK thread to fetch Wi-Fi data and send RADIO_STATUS messages...")
         alink_thread = threading.Thread(target=alink.run_alink_thread, args=(hb_conn, shutdown_event, shared_state), daemon=True)
         alink_thread.start()
+    # Initialize timers
     last_hb_time = time.time()
-    last_file_check_time = time.time()  # for checking the file every 500ms
+    last_file_check_time = time.time()  # for file checking every 500ms
     hb_interval = 1.0  # seconds
     file_check_interval = 0.5  # seconds
+    # Use blocking recv_match with timeout (e.g., 0.05 sec) to reduce CPU usage.
     while not shutdown_event.is_set():
         now = time.time()
-        # Send heartbeat every second.
         if now - last_hb_time >= hb_interval:
             hb_conn.mav.heartbeat_send(
                 mavutil.mavlink.MAV_TYPE_GENERIC,
@@ -106,15 +107,13 @@ def run_sync_mode(args, shared_state):
             if args.verbose:
                 print("Heartbeat sent.")
             last_hb_time = now
-
-        # Check every 500ms for a file containing a text message.
         if now - last_file_check_time >= file_check_interval:
             try:
                 if os.path.exists("/tmp/message.mavlink"):
                     with open("/tmp/message.mavlink", "r") as f:
                         text = f.read().strip()
                     if text:
-                        # Send STATUSTEXT with severity INFO (6) using the text.
+                        # Send STATUSTEXT message with severity INFO (6) using the file text.
                         hb_conn.mav.statustext_send(6, text.encode('ascii'))
                         if args.verbose:
                             print("STATUSTEXT sent: " + text)
@@ -129,8 +128,8 @@ def run_sync_mode(args, shared_state):
                     if args.verbose:
                         print("Error deleting /tmp/message.mavlink: ", e)
             last_file_check_time = now
-
-        msg = in_conn.recv_match(blocking=False)
+        # Use blocking call with a timeout to wait for a message.
+        msg = in_conn.recv_match(blocking=True, timeout=0.05)
         if msg:
             msg_dict = msg.to_dict()
             add_to_history(msg_dict, shared_state)
@@ -157,8 +156,6 @@ def run_sync_mode(args, shared_state):
             if forward_conn:
                 raw_msg = msg.get_msgbuf()
                 forward_conn.write(raw_msg)
-        else:
-            time.sleep(0.01)
     print("Shutdown signal received in sync mode. Exiting run_sync_mode.")
 
 # ----------------------
