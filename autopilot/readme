@@ -1,5 +1,8 @@
 TODO:
 Add gps support
+channel sync radxa + vtx with 6 pos switch
+bitrate set with knob
+
 
 autopilot_armhf:
 Usage: autopilot_armhf [-v] [-s system_id] [-c component_id] [-t vehicle_type] [-a autopilot_type] [-m custom_mode] [-b base_mode]
