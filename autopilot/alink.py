@@ -107,7 +107,7 @@ def send_radio_status_alink(conn, recovered_packet_count, shared_state):
          "fixed": fixed,
          "source": "alink"
     }
-    # Import the helper function locally to avoid circular imports.
+    # Import helper locally to avoid circular imports.
     from mavfwd import add_to_alink_sent_history
     add_to_alink_sent_history(msg_dict, shared_state)
 
@@ -120,18 +120,25 @@ def run_alink_thread(conn, shutdown_event, shared_state):
     while not shutdown_event.is_set():
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
+                client_socket.settimeout(1.0)
                 print(f"ALINK: Connecting to {ALINK_HOST}:{ALINK_PORT}...")
                 client_socket.connect((ALINK_HOST, ALINK_PORT))
                 print(f"ALINK: Connected to {ALINK_HOST}:{ALINK_PORT}.")
                 while not shutdown_event.is_set():
-                    length_prefix = client_socket.recv(4)
+                    try:
+                        length_prefix = client_socket.recv(4)
+                    except socket.timeout:
+                        continue
                     if not length_prefix:
                         print("ALINK: Connection closed by server.")
                         break
                     msg_length = struct.unpack('!I', length_prefix)[0]
                     data = b""
                     while len(data) < msg_length:
-                        chunk = client_socket.recv(min(4096, msg_length - len(data)))
+                        try:
+                            chunk = client_socket.recv(min(4096, msg_length - len(data)))
+                        except socket.timeout:
+                            continue
                         if not chunk:
                             break
                         data += chunk
