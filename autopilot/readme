@@ -1,5 +1,5 @@
 TODO:
-Add statustext send in webui!
+Add gps support
 
 autopilot_armhf:
 Usage: autopilot_armhf [-v] [-s system_id] [-c component_id] [-t vehicle_type] [-a autopilot_type] [-m custom_mode] [-b base_mode]
