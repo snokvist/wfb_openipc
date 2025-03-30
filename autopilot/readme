@@ -2,6 +2,8 @@ TODO:
 Add gps support
 channel sync radxa + vtx with 6 pos switch
 bitrate set with knob
+create channel_live_change.sh
+integrate tx in arm with alink and autopilot
 
 
 autopilot_armhf:
