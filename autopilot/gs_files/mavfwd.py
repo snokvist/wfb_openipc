@@ -6,10 +6,10 @@ import socket
 import struct
 import threading
 import msgpack
+import os
 from pymavlink import mavutil
 import alink
 import flask_api  # renamed file to avoid conflict with the installed Flask package
-import os
 
 # Shared state class to hold all global data shared between modules.
 class SharedState:
@@ -53,9 +53,9 @@ shutdown_event = threading.Event()
 # SYNC MODE FUNCTION (only mode available)
 # ----------------------
 def run_sync_mode(args, shared_state):
-    print("Entering sync mode: Listening for MAVLink packets on UDP port 14550 (ELRS backpack broadcast)...")
+    print(f"Entering sync mode: Listening for MAVLink packets on UDP port {args.port} (ELRS backpack broadcast)...")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(('0.0.0.0', 14550))
+    sock.bind(('0.0.0.0', args.port))
     data, addr = sock.recvfrom(2048)
     remote_ip, remote_port = addr
     mav_temp = mavutil.mavlink.MAVLink(None)
@@ -73,15 +73,15 @@ def run_sync_mode(args, shared_state):
         print(f"Sync mode packet received from {remote_ip}:{remote_port}")
     print("Exiting sync mode. Transitioning to ELRS mode (heartbeat + parameter request).")
     sock.close()
-    # Create incoming connection on port 14550.
-    in_conn = mavutil.mavlink_connection('udpin:0.0.0.0:14550')
+    # Create incoming connection on specified port.
+    in_conn = mavutil.mavlink_connection(f'udpin:0.0.0.0:{args.port}')
     # Create outgoing connection using the extracted remote IP and port.
     hb_conn = mavutil.mavlink_connection(f'udpout:{remote_ip}:{remote_port}')
     shared_state.dest_mav_conn = hb_conn
     forward_conn = None
     if args.forward is not None:
         forward_conn = mavutil.mavlink_connection(f'udpout:127.0.0.1:{args.forward}')
-    print(f"ELRS mode: Listening on port 14550 and sending heartbeats to {remote_ip}:{remote_port}" +
+    print(f"ELRS mode: Listening on port {args.port} and sending heartbeats to {remote_ip}:{remote_port}" +
           (f", and forwarding to port {args.forward}" if forward_conn else ""))
     print("Requesting parameter list...")
     hb_conn.mav.param_request_list_send(1, 1)
@@ -90,12 +90,11 @@ def run_sync_mode(args, shared_state):
         print("Starting ALINK thread to fetch Wi-Fi data and send RADIO_STATUS messages...")
         alink_thread = threading.Thread(target=alink.run_alink_thread, args=(hb_conn, shutdown_event, shared_state), daemon=True)
         alink_thread.start()
-    # Initialize timers
     last_hb_time = time.time()
     last_file_check_time = time.time()  # for file checking every 500ms
     hb_interval = 1.0  # seconds
     file_check_interval = 0.5  # seconds
-    # Use blocking recv_match with timeout (e.g., 0.05 sec) to reduce CPU usage.
+    # Use blocking recv_match with a timeout to reduce CPU usage.
     while not shutdown_event.is_set():
         now = time.time()
         if now - last_hb_time >= hb_interval:
@@ -113,7 +112,6 @@ def run_sync_mode(args, shared_state):
                     with open("/tmp/message.mavlink", "r") as f:
                         text = f.read().strip()
                     if text:
-                        # Send STATUSTEXT message with severity INFO (6) using the file text.
                         hb_conn.mav.statustext_send(6, text.encode('ascii'))
                         if args.verbose:
                             print("STATUSTEXT sent: " + text)
@@ -128,7 +126,6 @@ def run_sync_mode(args, shared_state):
                     if args.verbose:
                         print("Error deleting /tmp/message.mavlink: ", e)
             last_file_check_time = now
-        # Use blocking call with a timeout to wait for a message.
         msg = in_conn.recv_match(blocking=True, timeout=0.05)
         if msg:
             msg_dict = msg.to_dict()
@@ -156,6 +153,8 @@ def run_sync_mode(args, shared_state):
             if forward_conn:
                 raw_msg = msg.get_msgbuf()
                 forward_conn.write(raw_msg)
+        else:
+            time.sleep(0.01)
     print("Shutdown signal received in sync mode. Exiting run_sync_mode.")
 
 # ----------------------
@@ -165,6 +164,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Replicate and process MAVLink UDP streams in sync mode with a Flask API."
     )
+    parser.add_argument('--port', type=int, default=14550,
+                        help="Port to use for MAVLink connections (default: 14550).")
     parser.add_argument('-f', '--forward', type=int, default=None,
                         help="Local UDP port to forward received MAVLink packets (optional).")
     parser.add_argument('-c', '--channels', type=str, default=None,
@@ -179,8 +180,6 @@ def main():
                         help="Display detailed MAVLink packet information (default: off).")
     parser.add_argument('--alink', action='store_true',
                         help="Also connect to the JSON server (ALINK) to fetch Wi-Fi data and send RADIO_STATUS messages.")
-    parser.add_argument('--sync', action='store_true',
-                        help="Activate sync mode (the only mode available).")
     args = parser.parse_args()
     if args.channels is not None:
         args.channels_list = [int(ch.strip()) for ch in args.channels.split(',') if ch.strip()]
