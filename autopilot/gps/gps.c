@@ -23,9 +23,9 @@ typedef struct {
     int32_t lon;             // Longitude (deg * 1e7)
     int32_t alt;             // Altitude (MSL) in mm
     int32_t relative_alt;    // Altitude above home in mm
-    int16_t vx;              // Ground X speed (cm/s, north)
-    int16_t vy;              // Ground Y speed (cm/s, east)
-    int16_t vz;              // Ground Z speed (cm/s, down)
+    int16_t vx;              // Ground speed in cm/s (north)
+    int16_t vy;              // Ground speed in cm/s (east)
+    int16_t vz;              // Ground speed in cm/s (down)
     uint16_t hdg;            // Heading in cdeg (0.01 deg); UINT16_MAX if unknown
 } global_position_int_t;
 
@@ -38,12 +38,12 @@ typedef struct {
     uint16_t ignore_flags;   // Bitmap for ignoring fields (set to 0)
     uint32_t time_week_ms;   // GPS time (ms since start of week) – not computed here
     uint16_t time_week;      // GPS week number – not computed here
-    uint8_t  fix_type;       // 0: no fix, 2: 2D fix, 3: 3D fix, 4: 3D with DGPS, etc.
+    uint8_t  fix_type;       // 0: no fix, 2: 2D fix, 3: 3D fix, etc.
     int32_t  lat;            // Latitude (deg * 1e7)
     int32_t  lon;            // Longitude (deg * 1e7)
     float    alt;            // Altitude (MSL) in m
     float    hdop;           // Horizontal dilution of precision
-    float    vdop;           // Vertical dilution of precision (not computed)
+    float    vdop;           // Vertical dilution (not computed)
     float    vn;             // Velocity in north (m/s)
     float    ve;             // Velocity in east (m/s)
     float    vd;             // Velocity in down (m/s)
@@ -55,6 +55,31 @@ typedef struct {
 } gps_input_t;
 
 // -------------------------------
+// Filtered state structure.
+// -------------------------------
+typedef struct {
+    double lat;
+    double lon;
+    double alt;
+    double speed_knots;
+    double course_deg;
+    uint32_t time_boot_ms; // Time of last accepted update (ms)
+    int valid;
+} filtered_state_t;
+
+// -------------------------------
+// Filter statistics structure.
+// -------------------------------
+typedef struct {
+    unsigned long lat_rejections;
+    unsigned long lon_rejections;
+    unsigned long alt_rejections;
+    unsigned long speed_rejections;
+    unsigned long course_rejections;
+    unsigned long forced_updates;
+} filter_stats_t;
+
+// -------------------------------
 // Global variables holding latest parsed data.
 // -------------------------------
 static double current_lat = 0.0;
@@ -64,25 +89,30 @@ static double current_course_deg = 0.0;
 static double current_alt = 0.0; // in meters
 
 // Additional info from GPGGA:
-static int gps_fix_quality = 0;      // Field 7: 0 = invalid, 1 = GPS fix, 2 = DGPS fix, etc.
-static int satellites_visible = 0;     // Field 8: Number of satellites used.
-static double hdop_value = 0.0;        // Field 9: HDOP value.
+static int gps_fix_quality = 0;      // Fix quality: 0 = invalid, 1 = GPS fix, 2 = DGPS fix, etc.
+static int satellites_visible = 0;     // Number of satellites used.
+static double hdop_value = 0.0;        // HDOP value.
 
 // GPS time from $GPRMC (combined date and time) in microseconds.
 static uint64_t gps_time_usec = 0;
 
-// Flags indicating that valid GPRMC and GPGGA sentences have been parsed.
+// Flags indicating that valid $GPRMC and $GPGGA sentences have been parsed.
 static int valid_rmc = 0;
 static int valid_gga = 0;
 
 // For computing time_boot_ms.
 static struct timeval start_time;
 
+// Fix counter.
+static unsigned long fix_count = 0;
+
+// Filtering flag and state.
+static int filtering_enabled = 0;
+static filtered_state_t filtered_state = { .valid = 0 };
+static filter_stats_t filter_stats = {0};
+
 // Debug flag: if set (with -v), extra output is printed.
 static int debug = 0;
-
-// Counter for number of fixes.
-static unsigned long fix_count = 0;
 
 // -------------------------------
 // Serial port configuration: sets 115200 baud, 8N1, raw mode.
@@ -299,6 +329,133 @@ uint32_t get_time_boot_ms() {
 }
 
 // -------------------------------
+// Apply filtering to the current measurement using an exponential moving average
+// with a dynamic threshold based on recent speed estimates.
+// If dt (time since last accepted update) is less than 500 ms, then the new reading
+// is accepted only if it is within the dynamic thresholds. Otherwise, the reading is dropped.
+// If dt is greater than or equal to 500 ms, a forced update is performed regardless.
+// -------------------------------
+void apply_filter() {
+    uint32_t current_time = get_time_boot_ms();
+    double dt = (current_time - filtered_state.time_boot_ms) / 1000.0; // seconds
+    double alpha = 0.2; // smoothing factor
+    
+    // If filter not yet initialized, initialize with current reading.
+    if (!filtered_state.valid) {
+        filtered_state.lat = current_lat;
+        filtered_state.lon = current_lon;
+        filtered_state.alt = current_alt;
+        filtered_state.speed_knots = current_speed_knots;
+        filtered_state.course_deg = current_course_deg;
+        filtered_state.time_boot_ms = current_time;
+        filtered_state.valid = 1;
+        if (debug)
+            printf("Filter initialized with current reading.\n");
+        return;
+    }
+    
+    // Compute dynamic threshold based on recent speed (m/s) from filtered state.
+    double recent_speed = filtered_state.speed_knots * 0.514444;
+    if (recent_speed < 5.0) recent_speed = 5.0;
+    if (recent_speed > 33.0) recent_speed = 33.0;
+    double allowed_disp = recent_speed * dt * 1.5;
+    
+    // Compute thresholds:
+    double threshold_lat = allowed_disp / 111320.0;
+    double cos_lat = cos(filtered_state.lat * M_PI / 180.0);
+    double threshold_lon = allowed_disp / (111320.0 * (cos_lat > 0 ? cos_lat : 1));
+    double threshold_alt = 10.0;    // 10 meters for altitude.
+    double threshold_speed = 5.0;   // 5 knots for speed.
+    double threshold_course = 10.0; // 10 degrees for course.
+    
+    // If dt is less than 500 ms, perform rejection filtering.
+    if (dt < 0.5) {
+        int good = 1;
+        if (fabs(current_lat - filtered_state.lat) > threshold_lat) {
+            filter_stats.lat_rejections++;
+            if (debug)
+                printf("Reject latitude outlier: new=%.6f, filtered=%.6f, threshold=%.6f\n",
+                       current_lat, filtered_state.lat, threshold_lat);
+            good = 0;
+        }
+        if (fabs(current_lon - filtered_state.lon) > threshold_lon) {
+            filter_stats.lon_rejections++;
+            if (debug)
+                printf("Reject longitude outlier: new=%.6f, filtered=%.6f, threshold=%.6f\n",
+                       current_lon, filtered_state.lon, threshold_lon);
+            good = 0;
+        }
+        if (fabs(current_alt - filtered_state.alt) > threshold_alt) {
+            filter_stats.alt_rejections++;
+            if (debug)
+                printf("Reject altitude outlier: new=%.2f, filtered=%.2f, threshold=%.2f\n",
+                       current_alt, filtered_state.alt, threshold_alt);
+            good = 0;
+        }
+        if (fabs(current_speed_knots - filtered_state.speed_knots) > threshold_speed) {
+            filter_stats.speed_rejections++;
+            if (debug)
+                printf("Reject speed outlier: new=%.2f, filtered=%.2f, threshold=%.2f\n",
+                       current_speed_knots, filtered_state.speed_knots, threshold_speed);
+            good = 0;
+        }
+        double diff_course = current_course_deg - filtered_state.course_deg;
+        while(diff_course > 180.0) diff_course -= 360.0;
+        while(diff_course < -180.0) diff_course += 360.0;
+        if (fabs(diff_course) > threshold_course) {
+            filter_stats.course_rejections++;
+            if (debug)
+                printf("Reject course outlier: new=%.2f, filtered=%.2f, diff=%.2f, threshold=%.2f\n",
+                       current_course_deg, filtered_state.course_deg, diff_course, threshold_course);
+            good = 0;
+        }
+        
+        // Only update the filter state if all parameters are within thresholds.
+        if (good) {
+            filtered_state.lat = (1 - alpha) * filtered_state.lat + alpha * current_lat;
+            filtered_state.lon = (1 - alpha) * filtered_state.lon + alpha * current_lon;
+            filtered_state.alt = (1 - alpha) * filtered_state.alt + alpha * current_alt;
+            filtered_state.speed_knots = (1 - alpha) * filtered_state.speed_knots + alpha * current_speed_knots;
+            filtered_state.course_deg = (1 - alpha) * filtered_state.course_deg + alpha * current_course_deg;
+            filtered_state.time_boot_ms = current_time;
+            if (debug)
+                printf("Accepted reading (dt < 0.5 s).\n");
+        }
+        // If not good, drop the reading (do not update filtered state).
+        return;
+    }
+    // If dt is >= 500 ms, force an update even if the reading is an outlier.
+    else {
+        filtered_state.lat = (1 - alpha) * filtered_state.lat + alpha * current_lat;
+        filtered_state.lon = (1 - alpha) * filtered_state.lon + alpha * current_lon;
+        filtered_state.alt = (1 - alpha) * filtered_state.alt + alpha * current_alt;
+        filtered_state.speed_knots = (1 - alpha) * filtered_state.speed_knots + alpha * current_speed_knots;
+        double diff = current_course_deg - filtered_state.course_deg;
+        while(diff > 180.0) diff -= 360.0;
+        while(diff < -180.0) diff += 360.0;
+        filtered_state.course_deg = (1 - alpha) * filtered_state.course_deg + alpha * current_course_deg;
+        filtered_state.time_boot_ms = current_time;
+        filter_stats.forced_updates++;
+        if (debug)
+            printf("Forced update (dt >= 0.5 s).\n");
+        return;
+    }
+}
+
+// -------------------------------
+// Print filter statistics.
+// -------------------------------
+void print_filter_stats() {
+    printf("\nFilter Statistics:\n");
+    printf("  Forced Updates: %lu\n", filter_stats.forced_updates);
+    printf("  Latitude Rejections: %lu\n", filter_stats.lat_rejections);
+    printf("  Longitude Rejections: %lu\n", filter_stats.lon_rejections);
+    printf("  Altitude Rejections: %lu\n", filter_stats.alt_rejections);
+    printf("  Speed Rejections: %lu\n", filter_stats.speed_rejections);
+    printf("  Course Rejections: %lu\n", filter_stats.course_rejections);
+}
+
+// -------------------------------
 // Print GLOBAL_POSITION_INT message.
 // -------------------------------
 void print_global_position_int() {
@@ -306,7 +463,7 @@ void print_global_position_int() {
     msg.time_boot_ms = get_time_boot_ms();
     msg.lat = (int32_t)(current_lat * 1e7);
     msg.lon = (int32_t)(current_lon * 1e7);
-    msg.alt = (int32_t)(current_alt * 1000); // meters -> mm
+    msg.alt = (int32_t)(current_alt * 1000); // m -> mm
     msg.relative_alt = msg.alt;
     double speed_cm_s = current_speed_knots * 0.514444 * 100.0; // knots -> m/s -> cm/s
     double course_rad = current_course_deg * M_PI / 180.0;
@@ -334,11 +491,10 @@ void print_global_position_int() {
 }
 
 // -------------------------------
-// Print GPS_INPUT message (populating all fields with available info).
+// Print GPS_INPUT message (populating all available fields).
 // -------------------------------
 void print_gps_input() {
     gps_input_t msg;
-    // Use GPS-reported time (if available) or system time.
     if (gps_time_usec != 0)
         msg.time_usec = gps_time_usec;
     else {
@@ -348,9 +504,8 @@ void print_gps_input() {
     }
     msg.gps_id = 0;
     msg.ignore_flags = 0;
-    msg.time_week_ms = 0; // Not computed.
-    msg.time_week = 0;    // Not computed.
-    // Map fix quality to fix_type.
+    msg.time_week_ms = 0;
+    msg.time_week = 0;
     if (gps_fix_quality == 0)
         msg.fix_type = 0;
     else if (gps_fix_quality == 1)
@@ -363,7 +518,7 @@ void print_gps_input() {
     msg.lon = (int32_t)(current_lon * 1e7);
     msg.alt = (float)current_alt;
     msg.hdop = (float)hdop_value;
-    msg.vdop = (float)UINT16_MAX;  // Not computed.
+    msg.vdop = (float)UINT16_MAX; // Not computed.
     double speed_ms = current_speed_knots * 0.514444;
     msg.vn = (float)(speed_ms * cos(current_course_deg * M_PI / 180.0));
     msg.ve = (float)(speed_ms * sin(current_course_deg * M_PI / 180.0));
@@ -400,7 +555,7 @@ void print_gps_input() {
 }
 
 // -------------------------------
-// Print a summary of fix information.
+// Print a summary of fix information and filter statistics.
 // -------------------------------
 void print_fix_summary() {
     printf("\nGPS Fix Summary:\n");
@@ -408,15 +563,18 @@ void print_fix_summary() {
     printf("  Latest Fix Quality: %d\n", gps_fix_quality);
     printf("  Satellites Visible: %d\n", satellites_visible);
     printf("  HDOP: %.2f\n", hdop_value);
+    if (filtering_enabled)
+        print_filter_stats();
 }
 
 // -------------------------------
 // Usage message.
 // -------------------------------
 void usage(const char *progname) {
-    printf("Usage: %s [--port <uart_port>] [-v]\n", progname);
+    printf("Usage: %s [--port <uart_port>] [-v] [--filter]\n", progname);
     printf("  --port   : Specify UART port (default: /dev/ttyS2)\n");
     printf("  -v       : Verbose mode (print extra debug output)\n");
+    printf("  --filter : Enable filtering (dynamic threshold based on recent speed)\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -424,12 +582,13 @@ int main(int argc, char *argv[]) {
     static struct option long_options[] = {
         {"port",    required_argument, 0, 'p'},
         {"verbose", no_argument,       0, 'v'},
+        {"filter",  no_argument,       0, 'f'},
         {"help",    no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
     
     int opt;
-    while ((opt = getopt_long(argc, argv, "p:vh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "p:vfh", long_options, NULL)) != -1) {
         switch (opt) {
             case 'p':
                 strncpy(uart_port, optarg, sizeof(uart_port)-1);
@@ -437,6 +596,9 @@ int main(int argc, char *argv[]) {
                 break;
             case 'v':
                 debug = 1;
+                break;
+            case 'f':
+                filtering_enabled = 1;
                 break;
             case 'h':
             default:
@@ -447,6 +609,8 @@ int main(int argc, char *argv[]) {
     
     if (debug)
         printf("Using UART port: %s\n", uart_port);
+    if (filtering_enabled && debug)
+        printf("Filtering enabled.\n");
     
     int fd = open(uart_port, O_RDWR | O_NOCTTY | O_NDELAY);
     if (fd == -1) {
@@ -454,7 +618,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    // Set the file descriptor to blocking mode.
+    // Set file descriptor to blocking mode.
     fcntl(fd, F_SETFL, 0);
     configure_serial(fd, B115200);
     
@@ -520,13 +684,16 @@ int main(int argc, char *argv[]) {
                     in_buffer[buffer_pos] = '\0';
                 }
                 
-                // If both valid RMC and GGA data are available, print the messages and summary.
                 if (valid_rmc && valid_gga) {
+                    if (filtering_enabled)
+                        apply_filter();
+                    
                     print_global_position_int();
                     print_gps_input();
                     fix_count++;
                     print_fix_summary();
-                    // Reset flags to wait for the next complete fix.
+                    
+                    // Reset flags for next fix.
                     valid_rmc = 0;
                     valid_gga = 0;
                 }
