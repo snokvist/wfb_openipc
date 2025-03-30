@@ -13,6 +13,8 @@
 #include <time.h>
 
 #define BUFFER_SIZE 1024
+#define MAX_TIMESTAMPS 256   // Maximum number of timestamps stored in the moving window.
+#define WINDOW_DURATION 5.0  // 5-second window for frequency measurements.
 
 // -------------------------------
 // MAVLink GLOBAL_POSITION_INT (33)
@@ -77,6 +79,8 @@ typedef struct {
     unsigned long speed_rejections;
     unsigned long course_rejections;
     unsigned long forced_updates;
+    double display_frequency;  // Hz (accepted updates)
+    double incoming_frequency; // Hz (incoming valid fixes)
 } filter_stats_t;
 
 // -------------------------------
@@ -89,14 +93,14 @@ static double current_course_deg = 0.0;
 static double current_alt = 0.0; // in meters
 
 // Additional info from GPGGA:
-static int gps_fix_quality = 0;      // Fix quality: 0 = invalid, 1 = GPS fix, 2 = DGPS fix, etc.
+static int gps_fix_quality = 0;      // Fix quality: 0 = invalid, 1 = GPS fix, etc.
 static int satellites_visible = 0;     // Number of satellites used.
 static double hdop_value = 0.0;        // HDOP value.
 
 // GPS time from $GPRMC (combined date and time) in microseconds.
 static uint64_t gps_time_usec = 0;
 
-// Flags indicating that valid $GPRMC and $GPGGA sentences have been parsed.
+// Flags indicating valid $GPRMC and $GPGGA sentences.
 static int valid_rmc = 0;
 static int valid_gga = 0;
 
@@ -106,16 +110,53 @@ static struct timeval start_time;
 // Fix counter.
 static unsigned long fix_count = 0;
 
+// Moving window arrays for frequency measurement.
+static double incoming_times[MAX_TIMESTAMPS] = {0};
+static int incoming_count = 0;
+static double displayed_times[MAX_TIMESTAMPS] = {0};
+static int displayed_count = 0;
+
+// -------------------------------
 // Filtering flag and state.
+// -------------------------------
 static int filtering_enabled = 0;
 static filtered_state_t filtered_state = { .valid = 0 };
 static filter_stats_t filter_stats = {0};
 
-// Debug flag: if set (with -v), extra output is printed.
+// Debug flag.
 static int debug = 0;
 
 // -------------------------------
-// Serial port configuration: sets 115200 baud, 8N1, raw mode.
+// Helper: Record a timestamp (in seconds) into a moving window array and purge old entries.
+// -------------------------------
+void record_timestamp(double *timestamps, int *count, double current_time) {
+    if (*count < MAX_TIMESTAMPS) {
+        timestamps[*count] = current_time;
+        (*count)++;
+    } else {
+        memmove(timestamps, timestamps+1, (MAX_TIMESTAMPS-1)*sizeof(double));
+        timestamps[MAX_TIMESTAMPS-1] = current_time;
+    }
+    while (*count > 0 && (current_time - timestamps[0]) > WINDOW_DURATION) {
+        memmove(timestamps, timestamps+1, ((*count)-1)*sizeof(double));
+        (*count)--;
+    }
+}
+
+// -------------------------------
+// Helper: Compute frequency (Hz) from timestamps in a moving window.
+// -------------------------------
+double get_frequency(double *timestamps, int count, double current_time) {
+    if (count < 2)
+        return 0.0;
+    double window = current_time - timestamps[0];
+    if (window <= 0.0)
+        return 0.0;
+    return count / window;
+}
+
+// -------------------------------
+// Serial port configuration: 115200 baud, 8N1, raw mode.
 // -------------------------------
 void configure_serial(int fd, int baud_rate) {
     struct termios options;
@@ -136,26 +177,22 @@ void configure_serial(int fd, int baud_rate) {
 }
 
 // -------------------------------
-// Parse $GPRMC sentence for position, speed, course, and GPS time.
-// Example:
-// $GPRMC,185129.40,A,5845.16178,N,01651.50601,E,0.019,,300325,,,A*79
+// Parse $GPRMC sentence.
 // -------------------------------
 int parse_gprmc(char *sentence) {
     char buf[BUFFER_SIZE];
     strncpy(buf, sentence, sizeof(buf));
     buf[sizeof(buf)-1] = '\0';
-
+    
     char *token = strtok(buf, ",");
     if (!token || strcmp(token, "$GPRMC") != 0)
         return -1;
     
-    // Field 1: UTC time (HHMMSS.ss)
     char time_str[16] = {0};
     token = strtok(NULL, ",");
     if (!token) return -1;
     strncpy(time_str, token, sizeof(time_str)-1);
     
-    // Field 2: Status (A = valid, V = void)
     token = strtok(NULL, ",");
     if (!token || token[0] != 'A') {
         if (debug)
@@ -163,38 +200,31 @@ int parse_gprmc(char *sentence) {
         return -1;
     }
     
-    // Field 3: Latitude (ddmm.mmmm)
     token = strtok(NULL, ",");
     if (!token || strlen(token) == 0) return -1;
     double raw_lat = atof(token);
     
-    // Field 4: N/S indicator.
     token = strtok(NULL, ",");
     if (!token) return -1;
     char lat_dir = token[0];
     
-    // Field 5: Longitude (dddmm.mmmm)
     token = strtok(NULL, ",");
     if (!token || strlen(token) == 0) return -1;
     double raw_lon = atof(token);
     
-    // Field 6: E/W indicator.
     token = strtok(NULL, ",");
     if (!token) return -1;
     char lon_dir = token[0];
     
-    // Field 7: Speed over ground in knots.
     token = strtok(NULL, ",");
     if (!token || strlen(token) == 0) return -1;
     double speed_knots = atof(token);
     
-    // Field 8: Course over ground (degrees).
     token = strtok(NULL, ",");
     double course_deg = 0.0;
     if (token && strlen(token) > 0)
         course_deg = atof(token);
     
-    // Field 9: Date (DDMMYY)
     char date_str[16] = {0};
     token = strtok(NULL, ",");
     if (token && strlen(token) >= 6) {
@@ -202,14 +232,12 @@ int parse_gprmc(char *sentence) {
         date_str[6] = '\0';
     }
     
-    // Convert latitude.
     int lat_deg = (int)(raw_lat / 100);
     double lat_min = raw_lat - (lat_deg * 100);
     double dec_lat = lat_deg + lat_min / 60.0;
     if (lat_dir == 'S')
         dec_lat = -dec_lat;
     
-    // Convert longitude.
     int lon_deg = (int)(raw_lon / 100);
     double lon_min = raw_lon - (lon_deg * 100);
     double dec_lon = lon_deg + lon_min / 60.0;
@@ -227,7 +255,6 @@ int parse_gprmc(char *sentence) {
                time_str, date_str, current_lat, current_lon, current_speed_knots, current_course_deg);
     }
     
-    // Convert date and time to Unix epoch (UTC) in microseconds.
     if (strlen(time_str) >= 6 && strlen(date_str) == 6) {
         struct tm tm_time = {0};
         char temp[3] = {0};
@@ -258,52 +285,41 @@ int parse_gprmc(char *sentence) {
 }
 
 // -------------------------------
-// Parse $GPGGA sentence for altitude and additional fix information.
-// Example:
-// $GPGGA,185129.40,5845.16178,N,01651.50601,E,1,06,1.47,43.3,M,27.7,M,,*68
+// Parse $GPGGA sentence.
 // -------------------------------
 int parse_gpgga(char *sentence) {
     char buf[BUFFER_SIZE];
     strncpy(buf, sentence, sizeof(buf));
-    buf[sizeof(buf)-1] = '\0';
+    buf[sizeof(buf)-1] = '\0';  // Fixed: correctly terminated
     
-    char *token = strtok(buf, ","); // "$GPGGA"
+    char *token = strtok(buf, ",");
     if (!token || strcmp(token, "$GPGGA") != 0)
         return -1;
     
-    // Field 2: UTC time (skip)
-    token = strtok(NULL, ",");
+    token = strtok(NULL, ","); // UTC time (skip)
     if (!token) return -1;
-    // Field 3: Latitude (skip)
-    token = strtok(NULL, ",");
+    token = strtok(NULL, ","); // Latitude (skip)
     if (!token) return -1;
-    // Field 4: N/S (skip)
-    token = strtok(NULL, ",");
+    token = strtok(NULL, ","); // N/S (skip)
     if (!token) return -1;
-    // Field 5: Longitude (skip)
-    token = strtok(NULL, ",");
+    token = strtok(NULL, ","); // Longitude (skip)
     if (!token) return -1;
-    // Field 6: E/W (skip)
-    token = strtok(NULL, ",");
+    token = strtok(NULL, ","); // E/W (skip)
     if (!token) return -1;
     
-    // Field 7: Fix quality.
-    token = strtok(NULL, ",");
+    token = strtok(NULL, ","); // Fix quality.
     if (!token) return -1;
     gps_fix_quality = atoi(token);
     
-    // Field 8: Number of satellites.
-    token = strtok(NULL, ",");
+    token = strtok(NULL, ","); // Number of satellites.
     if (!token) return -1;
     satellites_visible = atoi(token);
     
-    // Field 9: HDOP.
-    token = strtok(NULL, ",");
+    token = strtok(NULL, ","); // HDOP.
     if (!token) return -1;
     hdop_value = atof(token);
     
-    // Field 10: Altitude.
-    token = strtok(NULL, ",");
+    token = strtok(NULL, ","); // Altitude.
     if (!token || strlen(token) == 0) return -1;
     double altitude = atof(token);
     current_alt = altitude;
@@ -318,29 +334,26 @@ int parse_gpgga(char *sentence) {
 }
 
 // -------------------------------
-// Compute elapsed time since program start in milliseconds.
+// Get elapsed time (ms) since program start.
 // -------------------------------
 uint32_t get_time_boot_ms() {
     struct timeval now;
     gettimeofday(&now, NULL);
-    uint32_t elapsed = (now.tv_sec - start_time.tv_sec) * 1000 +
-                       (now.tv_usec - start_time.tv_usec) / 1000;
+    uint32_t elapsed = (now.tv_sec - start_time.tv_sec)*1000 + (now.tv_usec - start_time.tv_usec)/1000;
     return elapsed;
 }
 
 // -------------------------------
-// Apply filtering to the current measurement using an exponential moving average
-// with a dynamic threshold based on recent speed estimates.
-// If dt (time since last accepted update) is less than 500 ms, then the new reading
-// is accepted only if it is within the dynamic thresholds. Otherwise, the reading is dropped.
-// If dt is greater than or equal to 500 ms, a forced update is performed regardless.
+// Apply filtering using an exponential moving average with dynamic thresholds.
+// If dt < 500 ms, the reading is accepted only if all parameters are within thresholds.
+// If dt >= 500 ms, a forced update is performed.
+// Returns: 1 if accepted normally, 2 if forced update, 0 if rejected.
 // -------------------------------
-void apply_filter() {
+int apply_filter() {
     uint32_t current_time = get_time_boot_ms();
-    double dt = (current_time - filtered_state.time_boot_ms) / 1000.0; // seconds
-    double alpha = 0.2; // smoothing factor
+    double dt = (current_time - filtered_state.time_boot_ms) / 1000.0;
+    double alpha = 0.2;
     
-    // If filter not yet initialized, initialize with current reading.
     if (!filtered_state.valid) {
         filtered_state.lat = current_lat;
         filtered_state.lon = current_lon;
@@ -351,24 +364,20 @@ void apply_filter() {
         filtered_state.valid = 1;
         if (debug)
             printf("Filter initialized with current reading.\n");
-        return;
+        return 1;
     }
     
-    // Compute dynamic threshold based on recent speed (m/s) from filtered state.
     double recent_speed = filtered_state.speed_knots * 0.514444;
     if (recent_speed < 5.0) recent_speed = 5.0;
     if (recent_speed > 33.0) recent_speed = 33.0;
     double allowed_disp = recent_speed * dt * 1.5;
-    
-    // Compute thresholds:
     double threshold_lat = allowed_disp / 111320.0;
     double cos_lat = cos(filtered_state.lat * M_PI / 180.0);
     double threshold_lon = allowed_disp / (111320.0 * (cos_lat > 0 ? cos_lat : 1));
-    double threshold_alt = 10.0;    // 10 meters for altitude.
-    double threshold_speed = 5.0;   // 5 knots for speed.
-    double threshold_course = 10.0; // 10 degrees for course.
+    double threshold_alt = 10.0;
+    double threshold_speed = 5.0;
+    double threshold_course = 20.0; // Increased from 10° to 20°.
     
-    // If dt is less than 500 ms, perform rejection filtering.
     if (dt < 0.5) {
         int good = 1;
         if (fabs(current_lat - filtered_state.lat) > threshold_lat) {
@@ -409,8 +418,6 @@ void apply_filter() {
                        current_course_deg, filtered_state.course_deg, diff_course, threshold_course);
             good = 0;
         }
-        
-        // Only update the filter state if all parameters are within thresholds.
         if (good) {
             filtered_state.lat = (1 - alpha) * filtered_state.lat + alpha * current_lat;
             filtered_state.lon = (1 - alpha) * filtered_state.lon + alpha * current_lon;
@@ -420,11 +427,10 @@ void apply_filter() {
             filtered_state.time_boot_ms = current_time;
             if (debug)
                 printf("Accepted reading (dt < 0.5 s).\n");
+            return 1;
         }
-        // If not good, drop the reading (do not update filtered state).
-        return;
+        return 0;
     }
-    // If dt is >= 500 ms, force an update even if the reading is an outlier.
     else {
         filtered_state.lat = (1 - alpha) * filtered_state.lat + alpha * current_lat;
         filtered_state.lon = (1 - alpha) * filtered_state.lon + alpha * current_lon;
@@ -438,14 +444,17 @@ void apply_filter() {
         filter_stats.forced_updates++;
         if (debug)
             printf("Forced update (dt >= 0.5 s).\n");
-        return;
+        return 2;
     }
 }
 
 // -------------------------------
-// Print filter statistics.
+// Print moving window frequency stats.
 // -------------------------------
 void print_filter_stats() {
+    double current_time_sec = get_time_boot_ms() / 1000.0;
+    double in_freq = get_frequency(incoming_times, incoming_count, current_time_sec);
+    double disp_freq = get_frequency(displayed_times, displayed_count, current_time_sec);
     printf("\nFilter Statistics:\n");
     printf("  Forced Updates: %lu\n", filter_stats.forced_updates);
     printf("  Latitude Rejections: %lu\n", filter_stats.lat_rejections);
@@ -453,6 +462,8 @@ void print_filter_stats() {
     printf("  Altitude Rejections: %lu\n", filter_stats.alt_rejections);
     printf("  Speed Rejections: %lu\n", filter_stats.speed_rejections);
     printf("  Course Rejections: %lu\n", filter_stats.course_rejections);
+    printf("  Display Frequency: %.2f Hz\n", disp_freq);
+    printf("  Incoming Update Frequency: %.2f Hz\n", in_freq);
 }
 
 // -------------------------------
@@ -463,9 +474,9 @@ void print_global_position_int() {
     msg.time_boot_ms = get_time_boot_ms();
     msg.lat = (int32_t)(current_lat * 1e7);
     msg.lon = (int32_t)(current_lon * 1e7);
-    msg.alt = (int32_t)(current_alt * 1000); // m -> mm
+    msg.alt = (int32_t)(current_alt * 1000);
     msg.relative_alt = msg.alt;
-    double speed_cm_s = current_speed_knots * 0.514444 * 100.0; // knots -> m/s -> cm/s
+    double speed_cm_s = current_speed_knots * 0.514444 * 100.0;
     double course_rad = current_course_deg * M_PI / 180.0;
     msg.vx = (int16_t)(speed_cm_s * cos(course_rad));
     msg.vy = (int16_t)(speed_cm_s * sin(course_rad));
@@ -491,7 +502,7 @@ void print_global_position_int() {
 }
 
 // -------------------------------
-// Print GPS_INPUT message (populating all available fields).
+// Print GPS_INPUT message.
 // -------------------------------
 void print_gps_input() {
     gps_input_t msg;
@@ -518,7 +529,7 @@ void print_gps_input() {
     msg.lon = (int32_t)(current_lon * 1e7);
     msg.alt = (float)current_alt;
     msg.hdop = (float)hdop_value;
-    msg.vdop = (float)UINT16_MAX; // Not computed.
+    msg.vdop = (float)UINT16_MAX;
     double speed_ms = current_speed_knots * 0.514444;
     msg.vn = (float)(speed_ms * cos(current_course_deg * M_PI / 180.0));
     msg.ve = (float)(speed_ms * sin(current_course_deg * M_PI / 180.0));
@@ -555,16 +566,19 @@ void print_gps_input() {
 }
 
 // -------------------------------
-// Print a summary of fix information and filter statistics.
+// Print a summary of fix information and moving-window frequency stats.
+// If no accepted update for >5 seconds, signal loss is indicated.
 // -------------------------------
 void print_fix_summary() {
+    uint32_t current_time = get_time_boot_ms();
     printf("\nGPS Fix Summary:\n");
     printf("  Total Fixes: %lu\n", fix_count);
     printf("  Latest Fix Quality: %d\n", gps_fix_quality);
     printf("  Satellites Visible: %d\n", satellites_visible);
     printf("  HDOP: %.2f\n", hdop_value);
-    if (filtering_enabled)
-        print_filter_stats();
+    print_filter_stats();
+    if (current_time - filtered_state.time_boot_ms > 5000)
+        printf("\nSignal lost: No accepted update for more than 5 seconds.\n");
 }
 
 // -------------------------------
@@ -618,11 +632,14 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    // Set file descriptor to blocking mode.
     fcntl(fd, F_SETFL, 0);
     configure_serial(fd, B115200);
     
     gettimeofday(&start_time, NULL);
+    
+    // Initialize moving window arrays.
+    incoming_count = 0;
+    displayed_count = 0;
     
     char in_buffer[BUFFER_SIZE];
     int buffer_pos = 0;
@@ -634,15 +651,14 @@ int main(int argc, char *argv[]) {
         FD_SET(fd, &readfds);
         struct timeval timeout;
         timeout.tv_sec = 0;
-        timeout.tv_usec = 100000; // 100 ms timeout
+        timeout.tv_usec = 100000;
         
         int ret = select(fd + 1, &readfds, NULL, NULL, &timeout);
         if (ret < 0) {
             perror("select error");
             break;
-        } else if (ret == 0) {
+        } else if (ret == 0)
             continue;
-        }
         
         if (FD_ISSET(fd, &readfds)) {
             char temp_buf[128];
@@ -662,21 +678,18 @@ int main(int argc, char *argv[]) {
                     memset(in_buffer, 0, sizeof(in_buffer));
                 }
                 
-                // Process complete lines (terminated by '\n').
                 char *newline;
                 while ((newline = strchr(in_buffer, '\n')) != NULL) {
                     *newline = '\0';
                     if (debug)
                         printf("Processing line: %s\n", in_buffer);
                     
-                    if (strncmp(in_buffer, "$GPRMC", 6) == 0) {
+                    if (strncmp(in_buffer, "$GPRMC", 6) == 0)
                         parse_gprmc(in_buffer);
-                    } else if (strncmp(in_buffer, "$GPGGA", 6) == 0) {
+                    else if (strncmp(in_buffer, "$GPGGA", 6) == 0)
                         parse_gpgga(in_buffer);
-                    } else {
-                        if (debug)
-                            printf("Ignored line: %s\n", in_buffer);
-                    }
+                    else if (debug)
+                        printf("Ignored line: %s\n", in_buffer);
                     
                     int remaining = buffer_pos - (newline - in_buffer + 1);
                     memmove(in_buffer, newline + 1, remaining);
@@ -685,15 +698,27 @@ int main(int argc, char *argv[]) {
                 }
                 
                 if (valid_rmc && valid_gga) {
+                    double current_time_sec = get_time_boot_ms() / 1000.0;
+                    record_timestamp(incoming_times, &incoming_count, current_time_sec);
+                    
+                    int accept = 1;
                     if (filtering_enabled)
-                        apply_filter();
+                        accept = apply_filter();
                     
-                    print_global_position_int();
-                    print_gps_input();
-                    fix_count++;
-                    print_fix_summary();
-                    
-                    // Reset flags for next fix.
+                    if (accept > 0) {
+                        record_timestamp(displayed_times, &displayed_count, current_time_sec);
+                        if (filtering_enabled) {
+                            current_lat = filtered_state.lat;
+                            current_lon = filtered_state.lon;
+                            current_alt = filtered_state.alt;
+                            current_speed_knots = filtered_state.speed_knots;
+                            current_course_deg = filtered_state.course_deg;
+                        }
+                        print_global_position_int();
+                        print_gps_input();
+                        fix_count++;
+                        print_fix_summary();
+                    }
                     valid_rmc = 0;
                     valid_gga = 0;
                 }
