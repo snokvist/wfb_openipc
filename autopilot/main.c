@@ -13,6 +13,7 @@
 #include "mavlink_handler.h"
 #include "rc_monitor.h"
 #include "alink.h"
+#include "gps.h"
 #include "utils.h"
 #include "mavlink/common/mavlink.h"
 
@@ -68,9 +69,23 @@ int main(int argc, char *argv[]) {
     uint8_t base_mode = 0;
     char *channels_arg = NULL;
     bool radio_camera_flag = false;
+    // GPS-related variables and defaults.
+    int gps_enabled = 0;
+    char gps_port[128] = "/dev/ttyS3";
+    char gps_baud_str[16] = "115200";
+    int gps_filter = 0; // Default: no filter.
 
     int opt;
-    while ((opt = getopt(argc, argv, "v:s:c:t:a:m:b:C:r")) != -1) {
+    // Also support long options for GPS.
+    static struct option long_options[] = {
+        {"gps", no_argument, 0, 'g'},
+        {"gps-port", required_argument, 0, 'P'},
+        {"gps-baud", required_argument, 0, 'B'},
+        {"gps-filter", no_argument, 0, 'F'},
+        {0, 0, 0, 0}
+    };
+    
+    while ((opt = getopt_long(argc, argv, "v:s:c:t:a:m:b:C:rgP:B:F", long_options, NULL)) != -1) {
         switch(opt) {
             case 'v': {
                 verbosity++;
@@ -91,38 +106,51 @@ int main(int argc, char *argv[]) {
             case 'b': base_mode = (uint8_t)atoi(optarg); break;
             case 'C': channels_arg = strdup(optarg); break;
             case 'r': radio_camera_flag = true; break;
+            case 'g': gps_enabled = 1; break;
+            case 'P': strncpy(gps_port, optarg, sizeof(gps_port)-1); gps_port[sizeof(gps_port)-1] = '\0'; break;
+            case 'B': strncpy(gps_baud_str, optarg, sizeof(gps_baud_str)-1); gps_baud_str[sizeof(gps_baud_str)-1] = '\0'; break;
+            case 'F': gps_filter = 1; break;
             default:
-                fprintf(stderr, "Usage: %s [-v] [-s system_id] [-c component_id] [-t vehicle_type] [-a autopilot_type] [-m custom_mode] [-b base_mode] [-C channels] [-r]\n", argv[0]);
+                fprintf(stderr, "Usage: %s [-v] [-s system_id] [-c component_id] [-t vehicle_type] [-a autopilot_type] [-m custom_mode] [-b base_mode] [-C channels] [-r] [--gps] [--gps-port <port>] [--gps-baud <baud>] [--gps-filter]\n", argv[0]);
                 exit(EXIT_FAILURE);
         }
     }
-
+    
     signal(SIGINT, signal_handler);
-
-    // Initialize RC monitoring module if channels specified.
+    
     if (channels_arg != NULL) {
         rc_monitor_init(channels_arg);
         free(channels_arg);
     }
-
-    // Initialize alink (UDP output for radio status) if requested.
+    
     if (radio_camera_flag) {
         if (alink_init() < 0) {
             if (verbosity >= 1)
                 printf("Failed to initialize alink UDP output.\n");
         }
     }
-
+    
     int serial_fd = open(SERIAL_PORT, O_RDWR | O_NOCTTY | O_SYNC);
     if (serial_fd < 0) {
-        perror("open");
+        perror("open main serial");
         return 1;
     }
     if (set_interface_attribs(serial_fd, BAUDRATE) != 0) {
         close(serial_fd);
         return 1;
     }
-
+    
+    // If GPS is enabled, open the GPS UART.
+    int gps_fd = -1;
+    if (gps_enabled) {
+        speed_t gps_baud = parse_baudrate(gps_baud_str);
+        gps_fd = gps_init(gps_port, gps_baud, gps_filter, verbosity);
+        if (gps_fd < 0) {
+            fprintf(stderr, "GPS initialization failed. Disabling GPS functionality.\n");
+            gps_enabled = 0;
+        }
+    }
+    
     uint8_t buffer[1024];
     mavlink_message_t msg;
     mavlink_status_t status;
@@ -130,7 +158,7 @@ int main(int argc, char *argv[]) {
     clock_gettime(CLOCK_MONOTONIC, &last_heartbeat);
     last_echo = last_heartbeat;
     last_msg_check = last_heartbeat;
-
+    
     if (verbosity >= 1) {
         printf("Starting advanced MAVLink autopilot with parameters:\n");
         printf("  System ID: %d\n", system_id);
@@ -140,11 +168,13 @@ int main(int argc, char *argv[]) {
         printf("  Custom Mode: %u\n", custom_mode);
         printf("  Base Mode: %d\n", base_mode);
         printf("  Verbosity: %d\n", verbosity);
-        printf("  Serial Port: %s @ baudrate 460800\n", SERIAL_PORT);
+        printf("  Main Serial Port: %s @ baudrate 460800\n", SERIAL_PORT);
         if (radio_camera_flag)
             printf("  RADIO_STATUS UDP output enabled (to 127.0.0.1:9999)\n");
+        if (gps_enabled)
+            printf("  GPS enabled on port %s @ baudrate %s, filter=%d\n", gps_port, gps_baud_str, gps_filter);
     }
-
+    
     while (running) {
         int n = read(serial_fd, buffer, sizeof(buffer));
         if (n > 0) {
@@ -158,7 +188,13 @@ int main(int argc, char *argv[]) {
                 }
             }
         }
-
+        
+        // If GPS is enabled, process its data.
+        if (gps_enabled) {
+            gps_process(gps_fd, verbosity);
+            gps_stream_update(serial_fd, verbosity);
+        }
+        
         clock_gettime(CLOCK_MONOTONIC, &current);
         if (elapsed_ms(last_heartbeat, current) >= HEARTBEAT_INTERVAL_MS) {
             mavlink_message_t heartbeat;
@@ -171,7 +207,7 @@ int main(int argc, char *argv[]) {
                 printf("Sent HEARTBEAT.\n");
             last_heartbeat = current;
         }
-
+        
         if (elapsed_ms(last_echo, current) >= ECHO_INTERVAL_MS) {
             mavlink_message_t echo_msg;
             uint8_t echo_buffer[256];
@@ -209,7 +245,7 @@ int main(int argc, char *argv[]) {
             }
             last_echo = current;
         }
-
+        
         if (elapsed_ms(last_msg_check, current) >= MSG_CHECK_INTERVAL_MS) {
             if (access("/tmp/message.mavlink", F_OK) == 0) {
                 int fd_msg = open("/tmp/message.mavlink", O_RDONLY);
@@ -233,14 +269,16 @@ int main(int argc, char *argv[]) {
             }
             last_msg_check = current;
         }
-
+        
         const mavlink_rc_channels_override_t *rc_data = get_last_rc_channels();
         if (rc_data)
             rc_monitor_update(rc_data, verbosity);
-
+        
         usleep(SLEEP_US);
     }
-
+    
     close(serial_fd);
+    if (gps_enabled)
+        close(gps_fd);
     return 0;
 }
