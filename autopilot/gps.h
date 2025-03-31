@@ -2,6 +2,7 @@
 #define GPS_H
 
 #include "mavlink/common/mavlink.h"
+#include <termios.h>
 
 #define GPS_BUFFER_SIZE 300
 
