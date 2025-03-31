@@ -1,6 +1,7 @@
 #ifndef UTILS_H
 #define UTILS_H
 
+#include <termios.h>  // for speed_t
 #include <time.h>
 #include "mavlink/common/mavlink.h"
 
@@ -21,5 +22,8 @@ bool set_parameter_in_system(const char *param, float new_value, int verbosity);
 
 // Returns the raw RC channel value from a MAVLink RC_CHANNELS_OVERRIDE message.
 int get_rc_channel_value(const mavlink_rc_channels_override_t *rc, int channel);
+
+// Parses a string baud rate into a speed_t constant.
+speed_t parse_baudrate(const char *str);
 
 #endif // UTILS_H
