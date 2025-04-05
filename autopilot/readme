@@ -13,3 +13,4 @@ add timeout and error logic for --gps when no signal detected
 
 mavfwd.py --port 14551 -v
 ./autopilot_aarch64 -v1 --gps --gps-port /dev/ttyS2 --gps-filter
+cgps -s
