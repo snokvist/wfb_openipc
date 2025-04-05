@@ -1,37 +1,11 @@
 TODO:
-Add gps support
 channel sync radxa + vtx with 6 pos switch
 bitrate set with knob
 create channel_live_change.sh
 integrate tx in arm with alink and autopilot
-reconnect logic in mavfwd.py every 3sec for msgpack/alink
-divide up autopilot .c code in multiple files. makefile.
+Use SO_RESUSE port in mavfwd.py for flask
+Add gps access in flask server
+Move settings to flask
 
-
-autopilot_armhf:
-Usage: autopilot_armhf [-v] [-s system_id] [-c component_id] [-t vehicle_type] [-a autopilot_type] [-m custom_mode] [-b base_mode]
-
-root@openipc-ssc338q:~# autopilot_armhf -v
-Starting advanced MAVLink autopilot with parameters:
-  System ID: 1
-  Component ID: 1
-  Vehicle Type: 1
-  Autopilot Type: 0
-  Custom Mode: 0
-  Base Mode: 0
-  Verbose: Yes
-  Serial Port: /dev/ttyS2 @ baudrate 460800
-Received message: ID 70 from system 255, component 68
-Received message: ID 109 from system 255, component 68
-Received message: ID 109 from system 255, component 68
-Received message: ID 70 from system 255, component 68
-Received message: ID 109 from system 255, component 68
-Received message: ID 109 from system 255, component 68
-Received message: ID 70 from system 255, component 68
-Received message: ID 109 from system 255, component 68
-Received message: ID 109 from system 255, component 68
-Received message: ID 70 from system 255, component 68
-Received message: ID 109 from system 255, component 68
-Received message: ID 109 from system 255, component 68
-Received message: ID 70 from system 255, component 68
-
+mavfwd.py --port 14551 -v
+./autopilot_aarch64 -v1 --gps --gps-port /dev/ttyS2 --gps-filter
