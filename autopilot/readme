@@ -7,6 +7,8 @@ Use SO_RESUSE port in mavfwd.py for flask
 Add gps access in flask server
 Move settings to flask
 add statustext parsing for sync etcetera, qgc and flask webui
+add timeout and error logic for --gps when no signal detected
+
 
 
 mavfwd.py --port 14551 -v
