@@ -1,6 +1,4 @@
 from flask import Flask, jsonify, request, send_from_directory
-import socket
-from werkzeug.serving import run_simple
 
 def run_flask(shared_state):
     app = Flask(__name__)
@@ -36,9 +34,7 @@ def run_flask(shared_state):
         if not shared_state.dest_mav_conn:
             return jsonify({"error": "No MAVLink connection available"}), 500
         try:
-            shared_state.dest_mav_conn.mav.param_set_send(
-                1, 1, param_id.encode('ascii'), float(new_value), param["type"]
-            )
+            shared_state.dest_mav_conn.mav.param_set_send(1, 1, param_id.encode('ascii'), float(new_value), param["type"])
         except Exception as e:
             return jsonify({"error": f"Failed to send PARAM_SET: {e}"}), 500
         return jsonify({"status": "Parameter updated", param_id: param})
@@ -57,6 +53,7 @@ def run_flask(shared_state):
         with shared_state.history_lock:
             return jsonify(shared_state.alink_sent_history)
 
+    # New endpoint to send STATUSTEXT messages
     @app.route("/send_statustext", methods=["POST"])
     def send_statustext():
         if not request.json or "message" not in request.json:
@@ -65,17 +62,11 @@ def run_flask(shared_state):
         if not shared_state.dest_mav_conn:
             return jsonify({"error": "No MAVLink connection available"}), 500
         try:
+            # Encode the message as ASCII to satisfy pymavlink's requirements.
             shared_state.dest_mav_conn.mav.statustext_send(6, text.encode('ascii'))
         except Exception as e:
             return jsonify({"error": f"Failed to send STATUSTEXT: {e}"}), 500
         return jsonify({"status": "STATUSTEXT sent", "message": text})
     
-    # Use run_simple from Werkzeug with SO_REUSEADDR enabled
-    run_simple(
-        "0.0.0.0", 
-        5000, 
-        app, 
-        threaded=True, 
-        use_reloader=False,
-        socket_options=[(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)]
-    )
+    # Run the Flask app.
+    app.run(host="0.0.0.0", port=5000, threaded=True, use_reloader=False)
