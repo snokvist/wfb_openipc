@@ -164,8 +164,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Replicate and process MAVLink UDP streams in sync mode with a Flask API."
     )
-    parser.add_argument('--port', type=int, default=14550,
-                        help="Port to use for MAVLink connections (default: 14550).")
+    parser.add_argument('--port', type=int, default=14551,
+                        help="Port to use for MAVLink connections (default: 14551).")
     parser.add_argument('-f', '--forward', type=int, default=None,
                         help="Local UDP port to forward received MAVLink packets (optional).")
     parser.add_argument('-c', '--channels', type=str, default=None,
