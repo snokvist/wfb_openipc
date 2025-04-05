@@ -6,7 +6,7 @@ integrate tx in arm with alink and autopilot
 Use SO_RESUSE port in mavfwd.py for flask
 Add gps access in flask server
 Move settings to flask
-add statustext parsing for sync etcetera
+add statustext parsing for sync etcetera, qgc and flask webui
 
 
 mavfwd.py --port 14551 -v
