@@ -88,9 +88,9 @@ if [ "$MODE" = "cluster" ]; then
     # Forwarders for telemetry aggregation;
     # update -K and -l options from config file.
     wfb_tx -d -f data -p 144 -u 14551 -K "$WFB_KEY" -B 20 -G long -S 1 -L 1 -M 1 -k 1 -n 2 -T 0 -F 0 \
-           -i 7669206 -R 2097152 -l "$LOG_INTERVAL" -C 0 127.0.0.1 11001 &
+           -i 7669206 -R 2097152 -l "$LOG_INTERVAL" -C 8000 127.0.0.1 11001 &
     wfb_tx -d -f data -p 160 -u 5801 -K "$WFB_KEY" -B 20 -G long -S 1 -L 0 -M 1 -k 1 -n 2 -T 0 -F 0 \
-           -i 7669206 -R 2097152 -l "$LOG_INTERVAL" -C 0 127.0.0.1 11002 &
+           -i 7669206 -R 2097152 -l "$LOG_INTERVAL" -C 8001 127.0.0.1 11002 &
     wfb_rx -a 10001 -p 16 -u 14550 -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 &
     wfb_rx -a 10002 -p 32 -u 5800 -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 &
 fi
@@ -101,14 +101,14 @@ if [ "$MODE" = "local" ]; then
     # Local mode -- MAVLink pair: iterate over all NICs from config.
     for nic in $WFB_NICS; do
         wfb_tx -f data -p 144 -u 14551 -K "$WFB_KEY" -B 20 -G long -S 1 -L 1 -M 1 -k 1 -n 2 -T 0 -F 0 \
-               -i 7669206 -R 2097152 -l "$LOG_INTERVAL" -C 0 "$nic" &
+               -i 7669206 -R 2097152 -l "$LOG_INTERVAL" -C 8000 "$nic" &
         wfb_rx -p 16 -u 14550 -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 "$nic" &
     done
 
     # Local mode -- Tunnel pair: iterate over all NICs from config.
     for nic in $WFB_NICS; do
         wfb_tx -f data -p 160 -u 5801 -K "$WFB_KEY" -B 20 -G long -S 1 -L 0 -M 1 -k 1 -n 2 -T 0 -F 0 \
-               -i 7669206 -R 2097152 -l "$LOG_INTERVAL" -C 0 "$nic" &
+               -i 7669206 -R 2097152 -l "$LOG_INTERVAL" -C 8001 "$nic" &
         wfb_rx -p 32 -u 5800 -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 "$nic" &
     done
 fi
