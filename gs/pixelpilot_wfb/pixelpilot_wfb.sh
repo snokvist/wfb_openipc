@@ -73,7 +73,7 @@ if [ "$MODE" = "local" ]; then
         echo "Launching wfb_rx on NIC: $nic"
         wfb_rx -p 0 $OUTPUT_OPTION -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 "$nic" &
     done
-elif [ "$MODE" = "aggregation" ]; then
+elif [ "$MODE" = "cluster" ]; then
     echo "Starting in AGGREGATION mode..."
     wfb_rx -a 10000 -p 0 $OUTPUT_OPTION -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 &
 else
