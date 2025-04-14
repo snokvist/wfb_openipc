@@ -76,10 +76,11 @@ if [ "$MODE" = "cluster" ]; then
     echo "Running in AGGREGATION mode..."
 
     # Aggregation mode: use only the first NIC.
-    # GS Video forwarders (do not change -c and -u options):
-    wfb_rx -f -c 127.0.0.1 -u 10000 -p 0 -i 7669206 -R 2097152 "$first_nic" &
     # GS MAVLink:
     wfb_rx -f -c 127.0.0.1 -u 10001 -p 16 -i 7669206 -R 2097152 "$first_nic" &
+
+    # GS Tunnel:
+    wfb_rx -f -c 127.0.0.1 -u 10002 -p 32 -i 7669206 -R 2097152 "$first_nic" &
 
     # Forwarders for telemetry aggregation;
     # update -K and -l options from config file.
