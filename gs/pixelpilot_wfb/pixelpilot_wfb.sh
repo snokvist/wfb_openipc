@@ -53,6 +53,17 @@ else
     OUTPUT_OPTION="-c $output_ip -u $output_port"
 fi
 
+# Function to cleanup background processes on exit.
+_cleanup() {
+    echo "Termination signal received. Killing all background processes..."
+    # Kill all background processes started by this script.
+    kill $(jobs -p) 2>/dev/null
+    exit 0
+}
+
+# Trap SIGINT (Ctrl+C) and SIGTERM to ensure the cleanup function is executed.
+trap _cleanup SIGINT SIGTERM
+
 # Check which mode to run
 if [ "$MODE" = "local" ]; then
     echo "Starting in LOCAL mode..."
