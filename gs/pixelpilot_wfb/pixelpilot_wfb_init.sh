@@ -118,7 +118,7 @@ fi
 # If TUNNEL is enabled in the config file, execute the tunnel command.
 if [ "$TUNNEL" = "enabled" ]; then
     echo "Starting tunnel..."
-    wfb_tun -a 10.5.0.10/24 &
+    wfb_tun -a 10.5.0.1/24 &
 fi
 
 echo "WFB-ng init done"
