@@ -76,6 +76,9 @@ if [ "$MODE" = "cluster" ]; then
     echo "Running in AGGREGATION mode..."
 
     # Aggregation mode: use only the first NIC.
+    # GS Video:
+     wfb_rx -f -c 127.0.0.1 -u 10000 -p 0 -i 7669206 -R 2097152 "$first_nic" &
+     
     # GS MAVLink:
     wfb_rx -f -c 127.0.0.1 -u 10001 -p 16 -i 7669206 -R 2097152 "$first_nic" &
 
