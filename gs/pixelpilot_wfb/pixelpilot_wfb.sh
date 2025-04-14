@@ -1,9 +1,9 @@
 #!/bin/bash
 # This script reads configuration from /etc/pixelpilot_wfb.cfg and starts wfb_rx
-# in either local or aggregation mode based on the MODE setting.
+# in either local or cluster mode based on the MODE setting.
 #
 # Expected configuration in /etc/pixelpilot_wfb.cfg (in the [pixelpilot_wfb] section):
-#   MODE=local                # "local" or "aggregation"
+#   MODE=local                # "local" or "cluster"
 #   LOG_INTERVAL=100          # e.g., 100 (ms)
 #   WFB_OUTPUT=127.0.0.1:5600   # or "unix" for UNIX sockets
 #   WFB_KEY=/etc/gs.key
