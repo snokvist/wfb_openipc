@@ -72,7 +72,7 @@ done
 # === Telemetry Instances ===
 
 # Execute commands conditionally by MODE.
-if [ "$MODE" = "aggregation" ]; then
+if [ "$MODE" = "cluster" ]; then
     echo "Running in AGGREGATION mode..."
 
     # Aggregation mode: use only the first NIC.
