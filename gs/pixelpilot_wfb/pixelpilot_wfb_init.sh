@@ -81,10 +81,6 @@ if [ "$MODE" = "cluster" ]; then
     # GS MAVLink:
     wfb_rx -f -c 127.0.0.1 -u 10001 -p 16 -i 7669206 -R 2097152 "$first_nic" &
 
-    # Commands with the -I option (use only the first NIC):
-    wfb_tx -I 11001 -R 2097152 "$first_nic" &
-    wfb_tx -I 11002 -R 2097152 "$first_nic" &
-
     # Forwarders for telemetry aggregation;
     # update -K and -l options from config file.
     wfb_tx -d -f data -p 144 -u 14551 -K "$WFB_KEY" -B 20 -G long -S 1 -L 1 -M 1 -k 1 -n 2 -T 0 -F 0 \
@@ -93,6 +89,11 @@ if [ "$MODE" = "cluster" ]; then
            -i 7669206 -R 2097152 -l "$LOG_INTERVAL" -C 8001 127.0.0.1 11002 &
     wfb_rx -a 10001 -p 16 -u 14550 -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 &
     wfb_rx -a 10002 -p 32 -u 5800 -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 &
+
+    echo "$first_nic"
+    # Commands with the -I option (use only the first NIC):
+    wfb_tx -I 11001 -R 2097152 "$first_nic" &
+    wfb_tx -I 11002 -R 2097152 "$first_nic" &
 fi
 
 if [ "$MODE" = "local" ]; then
