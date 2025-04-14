@@ -87,12 +87,12 @@ if [ "$MODE" = "cluster" ]; then
 
     # Forwarders for telemetry aggregation;
     # update -K and -l options from config file.
-    wfb_tx -d -f data -p 144 -u 0 -K "$WFB_KEY" -B 20 -G long -S 1 -L 1 -M 1 -k 1 -n 2 -T 0 -F 0 \
+    wfb_tx -d -f data -p 144 -u 14551 -K "$WFB_KEY" -B 20 -G long -S 1 -L 1 -M 1 -k 1 -n 2 -T 0 -F 0 \
            -i 7669206 -R 2097152 -l "$LOG_INTERVAL" -C 0 127.0.0.1 11001 &
-    wfb_tx -d -f data -p 160 -u 0 -K "$WFB_KEY" -B 20 -G long -S 1 -L 0 -M 1 -k 1 -n 2 -T 0 -F 0 \
+    wfb_tx -d -f data -p 160 -u 5801 -K "$WFB_KEY" -B 20 -G long -S 1 -L 0 -M 1 -k 1 -n 2 -T 0 -F 0 \
            -i 7669206 -R 2097152 -l "$LOG_INTERVAL" -C 0 127.0.0.1 11002 &
-    wfb_rx -a 10001 -p 16 -u 53710 -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 &
-    wfb_rx -a 10002 -p 32 -u 56176 -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 &
+    wfb_rx -a 10001 -p 16 -u 14550 -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 &
+    wfb_rx -a 10002 -p 32 -u 5800 -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 &
 fi
 
 if [ "$MODE" = "local" ]; then
