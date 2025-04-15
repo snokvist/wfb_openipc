@@ -66,13 +66,11 @@ trap _cleanup SIGINT SIGTERM
 
 # Check which mode to run
 if [ "$MODE" = "local" ]; then
-    echo "Starting in LOCAL mode..."
+   echo "Starting in LOCAL mode..."
     # For local mode, iterate through each NIC specified in WFB_NICS.
     # (WFB_NICS can contain space-separated NIC names.)
-    for nic in $WFB_NICS; do
-        echo "Launching wfb_rx on NIC: $nic"
-        wfb_rx -p 0 $OUTPUT_OPTION -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 "$nic" &
-    done
+    echo "Launching wfb_rx on NIC: $WFB_NICS"
+    wfb_rx -p 0 $OUTPUT_OPTION -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 $WFB_NICS &
 elif [ "$MODE" = "cluster" ]; then
     echo "Starting in AGGREGATION mode..."
     wfb_rx -a 10000 -p 0 $OUTPUT_OPTION -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 &
