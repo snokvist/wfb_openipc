@@ -1,129 +1,618 @@
-#!/bin/bash
-set -emb
+#!/usr/bin/env python3
+import sys, time, subprocess, re, socket, struct, threading
+from collections import defaultdict
 
-export LC_ALL=C
+# For Flask mode:
+from flask import Flask, render_template_string, jsonify, url_for
+# For ncurses mode:
+import curses
 
-# Cleanup function to kill background jobs on exit
-_cleanup() {
-  plist=$(jobs -p)
-  if [ -n "$plist" ]; then
-      kill -TERM $plist || true
-  fi
-  exit 1
+# ====================================================
+# Global Regular Expressions
+# ====================================================
+rx_ant_pattern = re.compile(
+    r"^(?P<ts>\d+)\s+RX_ANT\s+(?P<freq_info>\d+:\d+:\d+)\s+(?P<antenna_id>\S+)\s+(?P<stats>.+)"
+)
+pkt_pattern = re.compile(r"^(?P<ts>\d+)\s+PKT\s+(?P<info>[\d:]+)")
+session_pattern = re.compile(r"^(?P<ts>\d+)\s+SESSION\s+(?P<info>[\d:]+)")
+decrypt_error_pattern = re.compile(r"^Unable to decrypt packet")
+lost_packet_pattern = re.compile(r"^(?P<count>\d+)\s+packets lost")
+
+# ====================================================
+# Global Shared Variables
+# ====================================================
+global_summary = {
+    "rx_ant_count": 0,
+    "pkt_count": 0,
+    "session_count": 0,
+    "decrypt_error_count": 0,
+    "lost_packet_count": 0,
+    "mode": None,
 }
-trap _cleanup EXIT
+global_latest_pkt_info = None  # Expected keys: uniq, fec_rec, lost_total
 
-CONFIG_FILE="/etc/pixelpilot_wfb.cfg"
+# Chunk management from pixelpilot_wfb.sh:
+global_current_chunk = {}  # { antenna: {"rssi": int, "count_all": int} }
+global_last_chunk = {}
 
-# Verify config file exists
-if [ ! -f "$CONFIG_FILE" ]; then
-  echo "Config file $CONFIG_FILE not found!"
-  exit 1
-fi
+# Log lines (latest 300) – for debug purposes.
+global_log_lines = []
 
-# Extract settings from the [pixelpilot_wfb] section of the config file.
-TMP_CONFIG=$(mktemp)
-awk 'BEGIN { in_section=0 }
-     /^\[pixelpilot_wfb\]/ { in_section=1; next }
-     /^\[/ { in_section=0 }
-     in_section {
-         sub(/#.*/, "")          # Remove inline comments.
-         if ($0 ~ /=/)
-             print
-     }' "$CONFIG_FILE" > "$TMP_CONFIG"
-source "$TMP_CONFIG"
-rm "$TMP_CONFIG"
+global_time_index = 0
 
-# Ensure required config variable exists
-if [ -z "$WFB_NICS" ]; then
-  echo "WFB_NICS is not set in the config file!"
-  exit 1
-fi
+# Per-antenna histories (store only latest 100 points for each antenna)
+global_rssi_history_dict = defaultdict(list)
+global_lost_history_dict = defaultdict(list)
 
-# For aggregation mode and for -I option commands we use only the first NIC.
-first_nic=$(echo $WFB_NICS | awk '{print $1}')
+# New: Global status for pixelpilot_wfb_init.sh
+global_init_status = "not started"  # will be "running", "stopped", "error", "restarting"
 
-# Set regulatory domain using REGION from the config file.
-# (Note: Your sample config file provides REGION=00; ensure this is appropriate.)
-if [ -n "$REGION" ]; then
-    iw reg set "$REGION"
-else
-    iw reg set US
-fi
+data_lock = threading.Lock()
 
-# === WiFi NIC Initialization ===
-# Iterate through each NIC provided in WFB_NICS.
-for nic in $WFB_NICS; do
-    # If nmcli exists and the NIC is not already unmanaged, set it to unmanaged.
-    if which nmcli > /dev/null && nmcli device show "$nic" 2>/dev/null | grep -qv '(unmanaged)'; then
-        nmcli device set "$nic" managed no
-        sleep 1
-    fi
-    ip link set "$nic" down
-    iw dev "$nic" set monitor otherbss
-    ip link set "$nic" up
-    iw dev "$nic" set channel "$CHANNEL" "$BANDWIDTH"
-    # Set TX power if TX_POWER is nonempty.
-    if [ -n "$TX_POWER" ]; then
-        iw dev "$nic" set txpower fixed "$TX_POWER"
-    fi
-done
+# ====================================================
+# Helper Functions
+# ====================================================
+def determine_mode(antenna_id: str) -> str:
+    if re.search(r"[a-fA-F]", antenna_id):
+        return "Cluster"
+    return "Local"
 
-# === Telemetry Instances ===
+def parse_cluster_antenna(antenna_str: str):
+    try:
+        val = int(antenna_str, 16)
+        ip_part = (val >> 32) & 0xFFFFFFFF
+        wlan_antenna = val & 0xFF
+        ip_str = socket.inet_ntoa(struct.pack("!I", ip_part))
+        return (ip_str, wlan_antenna)
+    except Exception:
+        return (antenna_str, None)
 
-# Execute commands conditionally by MODE.
-if [ "$MODE" = "cluster" ]; then
-    echo "Running in AGGREGATION mode..."
+def generate_bar_components(value, bar_length=30):
+    value = max(-90, min(value, 0))
+    seg = bar_length // 3
+    if value <= -60:
+        red_fill = int((value + 90) / 30.0 * seg)
+        if red_fill < 1:
+            red_fill = 1
+    else:
+        red_fill = seg
+    if value <= -60:
+        yellow_fill = 0
+    elif value <= -30:
+        yellow_fill = int((value + 60) / 30.0 * seg)
+    else:
+        yellow_fill = seg
+    if value <= -30:
+        green_fill = 0
+    elif value == 0:
+        green_fill = seg
+    else:
+        green_fill = int((value + 30) / 30.0 * seg)
+    red_fill = min(red_fill, seg)
+    yellow_fill = min(yellow_fill, seg)
+    green_fill = min(green_fill, seg)
+    return red_fill, yellow_fill, green_fill, seg
 
-    # Aggregation mode: use only the first NIC.
-    # GS Video:
-     wfb_rx -f -c 127.0.0.1 -u 10000 -p 0 -i 7669206 -R 2097152 "$first_nic" &
-     
-    # GS MAVLink:
-    wfb_rx -f -c 127.0.0.1 -u 10001 -p 16 -i 7669206 -R 2097152 "$first_nic" &
+def draw_colored_bar(win, row, col, value, bar_length=30):
+    red_fill, yellow_fill, green_fill, seg = generate_bar_components(value, bar_length)
+    filled = "█"
+    empty = "░"
+    for i in range(seg):
+        ch = filled if i < red_fill else empty
+        win.addstr(row, col + i, ch, curses.color_pair(1) if i < red_fill else 0)
+    for i in range(seg):
+        ch = filled if i < yellow_fill else empty
+        win.addstr(row, col + seg + i, ch, curses.color_pair(2) if i < yellow_fill else 0)
+    for i in range(seg):
+        ch = filled if i < green_fill else empty
+        win.addstr(row, col + 2*seg + i, ch, curses.color_pair(3) if i < green_fill else 0)
 
-    # GS Tunnel:
-    wfb_rx -f -c 127.0.0.1 -u 10002 -p 32 -i 7669206 -R 2097152 "$first_nic" &
+def generate_html_bar(value, bar_length=30):
+    red_fill, yellow_fill, green_fill, seg = generate_bar_components(value, bar_length)
+    empty_red = seg - red_fill
+    empty_yellow = seg - yellow_fill
+    empty_green = seg - green_fill
+    red_seg = f'<span style="color:red;">{"█" * red_fill}</span><span style="color:gray;">{"░" * empty_red}</span>'
+    yellow_seg = f'<span style="color:orange;">{"█" * yellow_fill}</span><span style="color:gray;">{"░" * empty_yellow}</span>'
+    green_seg = f'<span style="color:green;">{"█" * green_fill}</span><span style="color:gray;">{"░" * empty_green}</span>'
+    return red_seg + yellow_seg + green_seg
 
-    # Forwarders for telemetry aggregation;
-    # update -K and -l options from config file.
-    wfb_tx -d -f data -p 144 -u 14551 -K "$WFB_KEY" -B 20 -G long -S 1 -L 1 -M 1 -k 1 -n 2 -T 0 -F 0 \
-           -i 7669206 -R 2097152 -l "$LOG_INTERVAL" -C 8000 127.0.0.1:11001 &
-    wfb_tx -d -f data -p 160 -u 5801 -K "$WFB_KEY" -B 20 -G long -S 1 -L 0 -M 1 -k 1 -n 2 -T 0 -F 0 \
-           -i 7669206 -R 2097152 -l "$LOG_INTERVAL" -C 8001 127.0.0.1:11002 &
-    wfb_rx -a 10001 -p 16 -u 14550 -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 &
-    wfb_rx -a 10002 -p 32 -u 5800 -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 &
+# ====================================================
+# Init Process Loop for pixelpilot_wfb_init.sh
+# ====================================================
+def init_process_loop():
+    global global_init_status, global_log_lines
+    while True:
+        try:
+            # Start the init script, output discarded.
+            proc = subprocess.Popen(
+                ["pixelpilot_wfb_init.sh"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            with data_lock:
+                global_init_status = "running"
+            proc.wait()
+            with data_lock:
+                global_init_status = "stopped"
+        except Exception as e:
+            with data_lock:
+                global_log_lines.append(f"Init error: {e}")
+                global_init_status = "error"
+        with data_lock:
+            global_init_status = "restarting"
+        time.sleep(3)
 
-    echo "$first_nic"
-    # Commands with the -I option (use only the first NIC):
-    wfb_tx -I 11001 -R 2097152 "$first_nic" &
-    wfb_tx -I 11002 -R 2097152 "$first_nic" &
-fi
+# ====================================================
+# Data Collection Loop for pixelpilot_wfb.sh
+# ====================================================
+def data_collection_loop():
+    global global_summary, global_latest_pkt_info, global_current_chunk, global_last_chunk
+    global global_rssi_history_dict, global_lost_history_dict, global_time_index, global_log_lines
 
-if [ "$MODE" = "local" ]; then
-    echo "Running in LOCAL mode..."
+    MAX_POINTS = 100  # Keep only latest 100 datapoints
 
-    # Local mode -- MAVLink pair: iterate over all NICs from config.
-    for nic in $WFB_NICS; do
-        wfb_tx -f data -p 144 -u 14551 -K "$WFB_KEY" -B 20 -G long -S 1 -L 1 -M 1 -k 1 -n 2 -T 0 -F 0 \
-               -i 7669206 -R 2097152 -l "$LOG_INTERVAL" -C 8000 "$nic" &
-        wfb_rx -p 16 -u 14550 -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 "$nic" &
-    done
+    # Wait 5 sec after init starts.
+    time.sleep(5)
 
-    # Local mode -- Tunnel pair: iterate over all NICs from config.
-    for nic in $WFB_NICS; do
-        wfb_tx -f data -p 160 -u 5801 -K "$WFB_KEY" -B 20 -G long -S 1 -L 0 -M 1 -k 1 -n 2 -T 0 -F 0 \
-               -i 7669206 -R 2097152 -l "$LOG_INTERVAL" -C 8001 "$nic" &
-        wfb_rx -p 32 -u 5800 -K "$WFB_KEY" -R 2097152 -l "$LOG_INTERVAL" -i 7669206 "$nic" &
-    done
-fi
+    while True:
+        try:
+            proc = subprocess.Popen(
+                ["pixelpilot_wfb.sh"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+        except Exception as e:
+            with data_lock:
+                global_log_lines.append(f"Error starting data process: {e}")
+                global_log_lines = global_log_lines[-300:]
+            time.sleep(3)
+            continue
 
-# === Tunnel Block ===
-# If TUNNEL is enabled in the config file, execute the tunnel command.
-if [ "$TUNNEL" = "enabled" ]; then
-    echo "Starting tunnel..."
-    wfb_tun -a 10.5.0.1/24 &
-fi
+        try:
+            while True:
+                try:
+                    line = proc.stdout.readline()
+                except Exception:
+                    break
+                if not line:
+                    if proc.poll() is not None:
+                        break
+                    time.sleep(0.1)
+                    continue
 
-echo "WFB-ng init done"
-wait -n
+                line = line.strip()
+                with data_lock:
+                    global_log_lines.append(line)
+                    global_log_lines = global_log_lines[-300:]
+
+                if decrypt_error_pattern.search(line):
+                    with data_lock:
+                        global_summary["decrypt_error_count"] += 1
+
+                lost_match = lost_packet_pattern.match(line)
+                if lost_match:
+                    with data_lock:
+                        global_summary["lost_packet_count"] += int(lost_match.group("count"))
+
+                if pkt_pattern.match(line):
+                    with data_lock:
+                        global_summary["pkt_count"] += 1
+                        parts = line.split("\t")
+                        if len(parts) >= 3:
+                            pkt_fields = parts[2].split(":")
+                            if len(pkt_fields) >= 8:
+                                try:
+                                    uniq = int(pkt_fields[5])
+                                    fec_rec = int(pkt_fields[6])
+                                    lost_total = int(pkt_fields[7])
+                                    global_latest_pkt_info = {"uniq": uniq, "fec_rec": fec_rec, "lost_total": lost_total}
+                                except Exception:
+                                    global_latest_pkt_info = None
+                            else:
+                                global_latest_pkt_info = None
+                        else:
+                            global_latest_pkt_info = None
+                        if global_current_chunk:
+                            global_last_chunk = global_current_chunk.copy()
+                            for ant, data in global_current_chunk.items():
+                                c_all = data["count_all"]
+                                rssi_val = data["rssi"]
+                                if global_latest_pkt_info:
+                                    lost_val = global_latest_pkt_info["uniq"] - c_all + global_latest_pkt_info["lost_total"] + global_latest_pkt_info["fec_rec"]
+                                else:
+                                    lost_val = 0
+                                global_rssi_history_dict[ant].append(rssi_val)
+                                global_lost_history_dict[ant].append(lost_val)
+                                # Trim lists
+                                if len(global_rssi_history_dict[ant]) > MAX_POINTS:
+                                    global_rssi_history_dict[ant] = global_rssi_history_dict[ant][-MAX_POINTS:]
+                                if len(global_lost_history_dict[ant]) > MAX_POINTS:
+                                    global_lost_history_dict[ant] = global_lost_history_dict[ant][-MAX_POINTS:]
+                            global_time_index += 1
+                        global_current_chunk = {}
+
+                if session_pattern.match(line):
+                    with data_lock:
+                        global_summary["session_count"] += 1
+
+                rx_match = rx_ant_pattern.match(line)
+                if rx_match:
+                    with data_lock:
+                        global_summary["rx_ant_count"] += 1
+                    antenna_id_raw = rx_match.group("antenna_id")
+                    with data_lock:
+                        if global_summary["mode"] is None:
+                            global_summary["mode"] = determine_mode(antenna_id_raw)
+                    stats = rx_match.group("stats").split(":")
+                    if len(stats) >= 3:
+                        try:
+                            c_all = int(stats[0])
+                            rssi_avg = int(stats[2])
+                        except Exception:
+                            rssi_avg = None
+                            c_all = None
+                    else:
+                        rssi_avg = None
+                        c_all = None
+                    with data_lock:
+                        if global_summary["mode"] == "Cluster":
+                            ip_str, wlan_idx = parse_cluster_antenna(antenna_id_raw)
+                            antenna_key = f"{ip_str} (antenna {wlan_idx})" if wlan_idx is not None else antenna_id_raw
+                        else:
+                            antenna_key = antenna_id_raw
+                        if rssi_avg is not None and c_all is not None:
+                            global_current_chunk[antenna_key] = {"rssi": rssi_avg, "count_all": c_all}
+        except KeyboardInterrupt:
+            proc.kill()
+            break
+        except Exception as e:
+            with data_lock:
+                global_log_lines.append(f"Error: {e}")
+                global_log_lines = global_log_lines[-300:]
+            time.sleep(3)
+        finally:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        time.sleep(3)
+
+# ====================================================
+# ncurses Display Mode
+# ====================================================
+def curses_mode(stdscr):
+    curses.curs_set(0)
+    curses.start_color()
+    curses.use_default_colors()
+    curses.init_pair(1, curses.COLOR_RED, -1)
+    curses.init_pair(2, curses.COLOR_YELLOW, -1)
+    curses.init_pair(3, curses.COLOR_GREEN, -1)
+    stdscr.nodelay(True)
+    while True:
+        with data_lock:
+            chunk_copy = global_last_chunk.copy()
+            pkt_info = global_latest_pkt_info.copy() if global_latest_pkt_info else None
+            summ = global_summary.copy()
+            init_status = global_init_status
+        stdscr.erase()
+        stdscr.addstr(0, 0, "PixelPilot_wfb Summary (ncurses mode)")
+        stdscr.addstr(1, 0, f"INIT: {init_status}")
+        stdscr.addstr(2, 0, f"Mode: {summ['mode'] if summ['mode'] else 'Unknown'}")
+        stdscr.addstr(3, 0, f"RX_ANT: {summ['rx_ant_count']}")
+        stdscr.addstr(4, 0, f"PKT:    {summ['pkt_count']}")
+        stdscr.addstr(5, 0, f"SESSION:{summ['session_count']}")
+        stdscr.addstr(6, 0, f"DecErr: {summ['decrypt_error_count']}")
+        stdscr.addstr(7, 0, f"LostPK: {summ['lost_packet_count']}")
+        stdscr.addstr(9, 0, "Latest Chunk:")
+        header = f"{'Ant':20} {'RSSI':>4}"
+        stdscr.addstr(10, 0, header)
+        line = 11
+        if chunk_copy and pkt_info:
+            for ant in sorted(chunk_copy.keys()):
+                data = chunk_copy[ant]
+                rssi_val = data["rssi"]
+                c_all = data["count_all"]
+                lost_val = pkt_info["uniq"] - c_all + pkt_info["lost_total"] + pkt_info["fec_rec"]
+                rssi_str = f"{rssi_val:>4}"
+                lost_str = f"{lost_val:+5d}"
+                stdscr.addstr(line, 0, f"{ant[:20]:20} {rssi_str} ")
+                draw_colored_bar(stdscr, line, 25, rssi_val, 30)
+                stdscr.addstr(line, 56, lost_str)
+                ratio = 0.0
+                if c_all > 0:
+                    ratio = max(0.0, min(lost_val / c_all, 1.0))
+                lost_bar_val = -int(ratio * 90)
+                draw_colored_bar(stdscr, line, 56 + len(lost_str) + 1, lost_bar_val, 30)
+                line += 1
+        else:
+            stdscr.addstr(line, 0, "No chunk data yet.")
+        stdscr.refresh()
+        try:
+            time.sleep(0.5)
+        except KeyboardInterrupt:
+            break
+
+# ====================================================
+# Flask Web UI Mode (Mobile Friendly, Static Size, No Excess Legend)
+# ====================================================
+def create_flask_app():
+    app = Flask(__name__)
+
+    # Endpoint: Latest Chunk Data (for slim display)
+    @app.route("/data/chunk")
+    def data_chunk():
+        chunk_stats = []
+        with data_lock:
+            chunk_copy = global_last_chunk.copy()
+            pkt_info = global_latest_pkt_info.copy() if global_latest_pkt_info else None
+        if chunk_copy and pkt_info:
+            for ant in sorted(chunk_copy.keys()):
+                data = chunk_copy[ant]
+                rssi_val = data["rssi"]
+                c_all = data["count_all"]
+                lost_val = pkt_info["uniq"] - c_all + pkt_info["lost_total"] + pkt_info["fec_rec"]
+                lost_str = f"{lost_val:+5d}"
+                rssi_bar = generate_html_bar(rssi_val, 30)
+                ratio = 0.0
+                if c_all > 0:
+                    ratio = max(0.0, min(lost_val / c_all, 1.0))
+                lost_bar_val = -int(ratio * 90)
+                lost_bar = generate_html_bar(lost_bar_val, 30)
+                chunk_stats.append({
+                    "antenna": ant[:20],
+                    "rssi": rssi_val,
+                    "lost": lost_str,
+                    "rssi_bar": rssi_bar,
+                    "lost_bar": lost_bar
+                })
+        return jsonify(chunk_stats)
+
+    # Endpoint: Per-antenna RSSI history (latest 100 points)
+    @app.route("/data/rssi")
+    def data_rssi():
+        datasets = {}
+        max_len = 0
+        with data_lock:
+            for ant, series in global_rssi_history_dict.items():
+                sliced = series[-100:]
+                datasets[ant] = sliced
+                if len(sliced) > max_len:
+                    max_len = len(sliced)
+            labels = list(range(max_len))
+        return jsonify({"labels": labels, "datasets": datasets})
+
+    # Endpoint: Per-antenna Lost history (latest 100 points)
+    @app.route("/data/lost")
+    def data_lost():
+        datasets = {}
+        max_len = 0
+        with data_lock:
+            for ant, series in global_lost_history_dict.items():
+                sliced = series[-100:]
+                datasets[ant] = sliced
+                if len(sliced) > max_len:
+                    max_len = len(sliced)
+            labels = list(range(max_len))
+        return jsonify({"labels": labels, "datasets": datasets})
+
+    # Main HTML template.
+    template = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <title>PixelPilot_wfb Web UI</title>
+      <style>
+        body { font-family: Arial, sans-serif; margin: 10px; }
+        .refresh-btn { margin: 5px; padding: 5px 10px; font-size: 14px; }
+        .stat-row { display: flex; align-items: center; margin-bottom: 5px; font-size: 14px; }
+        .stat-row div { margin-right: 5px; }
+        .ant-name { width: 80px; }
+        .rssi, .lost { width: 40px; text-align: right; }
+        .bar { font-family: monospace; }
+        canvas { width: 500px !important; height: 300px !important; }
+      </style>
+      <!-- Load Chart.js from local static folder -->
+      <script src="{{ url_for('static', filename='chart.min.js') }}"></script>
+    </head>
+    <body>
+      <h1>PixelPilot_wfb Summary</h1>
+      <div id="summary">
+        <strong>INIT:</strong> <span id="init_status">{{ init_status }}</span><br>
+        <strong>Mode:</strong> <span id="mode">{{ mode }}</span><br>
+        <strong>RX_ANT:</strong> <span id="rx_ant_count">{{ rx_ant_count }}</span> &nbsp;
+        <strong>PKT:</strong> <span id="pkt_count">{{ pkt_count }}</span> &nbsp;
+        <strong>SESSION:</strong> <span id="session_count">{{ session_count }}</span><br>
+        <strong>DecErr:</strong> <span id="decrypt_error_count">{{ decrypt_error_count }}</span> &nbsp;
+        <strong>Lost:</strong> <span id="lost_packet_count">{{ lost_packet_count }}</span>
+      </div>
+      <div>
+        <button class="refresh-btn" onclick="setRefreshRate(200)">200ms</button>
+        <button class="refresh-btn" onclick="setRefreshRate(500)">500ms</button>
+        <button class="refresh-btn" onclick="setRefreshRate(1000)">1000ms</button>
+      </div>
+      <h2>Latest Chunk Data</h2>
+      <div id="chunkStats" style="font-size:14px;"></div>
+      
+      <h2>History Charts</h2>
+      <canvas id="chartRssi"></canvas>
+      <canvas id="chartLost"></canvas>
+      
+      <script>
+        let refreshInterval = 200;
+        let refreshTimer;
+        
+        async function updateChunkStats() {
+          const resp = await fetch("/data/chunk");
+          const stats = await resp.json();
+          let html = "";
+          if (stats.length === 0) {
+            html = "<div>No RX_ANT data in current chunk.</div>";
+          } else {
+            stats.forEach(row => {
+              html += `<div class="stat-row">
+                          <div class="ant-name">${row.antenna}</div>
+                          <div class="rssi bar">${row.rssi_bar} <span>${row.rssi}</span></div>
+                          <div class="lost bar">${row.lost_bar} <span>${row.lost}</span></div>
+                       </div>`;
+            });
+          }
+          document.getElementById("chunkStats").innerHTML = html;
+        }
+        
+        // Fixed 20-color palette.
+        const colorPalette = [
+          "#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b","#e377c2","#7f7f7f",
+          "#bcbd22","#17becf","#228b22","#ff1493","#4169e1","#9acd32","#b03060","#ffd700",
+          "#008080","#c71585","#a0522d","#9400d3"
+        ];
+        function getColorForAntenna(ant, idx) {
+          return colorPalette[idx % colorPalette.length];
+        }
+        
+        let chartRssi, chartLost;
+        
+        async function updateRssiChart() {
+          const resp = await fetch("/data/rssi");
+          const data = await resp.json();
+          chartRssi.data.labels = data.labels;
+          const datasets = [];
+          const sortedAnts = Object.keys(data.datasets).sort();
+          sortedAnts.forEach((ant, idx) => {
+            datasets.push({
+              label: ant,
+              data: data.datasets[ant],
+              borderColor: getColorForAntenna(ant, idx),
+              fill: false,
+              pointRadius: 0,
+              tension: 0
+            });
+          });
+          chartRssi.data.datasets = datasets;
+          chartRssi.update(0);
+        }
+        
+        async function updateLostChart() {
+          const resp = await fetch("/data/lost");
+          const data = await resp.json();
+          chartLost.data.labels = data.labels;
+          const datasets = [];
+          const sortedAnts = Object.keys(data.datasets).sort();
+          sortedAnts.forEach((ant, idx) => {
+            datasets.push({
+              label: ant,
+              data: data.datasets[ant],
+              borderColor: getColorForAntenna(ant, idx),
+              fill: false,
+              pointRadius: 0,
+              tension: 0
+            });
+          });
+          chartLost.data.datasets = datasets;
+          chartLost.update(0);
+        }
+        
+        async function updateAll() {
+          updateChunkStats();
+          updateRssiChart();
+          updateLostChart();
+        }
+        
+        function setRefreshRate(ms) {
+          refreshInterval = ms;
+          if (refreshTimer) clearInterval(refreshTimer);
+          refreshTimer = setInterval(updateAll, refreshInterval);
+        }
+        
+        window.onload = function() {
+          const ctxRssi = document.getElementById("chartRssi").getContext("2d");
+          chartRssi = new Chart(ctxRssi, {
+            type: 'line',
+            data: { labels: [], datasets: [] },
+            options: {
+              responsive: false,
+              animation: false,
+              plugins: {
+                title: { display: true, text: "RSSI per Antenna" },
+                legend: { display: false }
+              },
+              scales: {
+                x: { title: { display: true, text: "Chunk Index" } },
+                y: { 
+                    title: { display: true, text: "RSSI" },
+                    min: -110,
+                    max: 0,
+                    ticks: { stepSize: 1 }
+                }
+              }
+            }
+          });
+          const ctxLost = document.getElementById("chartLost").getContext("2d");
+          chartLost = new Chart(ctxLost, {
+            type: 'line',
+            data: { labels: [], datasets: [] },
+            options: {
+              responsive: false,
+              animation: false,
+              plugins: {
+                title: { display: true, text: "Lost per Antenna" },
+                legend: { display: false }
+              },
+              scales: {
+                x: { title: { display: true, text: "Chunk Index" } },
+                y: { title: { display: true, text: "Lost" }, ticks: { stepSize: 1 } }
+              }
+            }
+          });
+          setRefreshRate(200);
+        };
+      </script>
+    </body>
+    </html>
+    """
+
+    @app.route("/")
+    def index():
+        with data_lock:
+            summ = global_summary.copy()
+            init_status = global_init_status
+        return render_template_string(template,
+                                      mode=summ["mode"] if summ["mode"] else "Unknown",
+                                      rx_ant_count=summ["rx_ant_count"],
+                                      pkt_count=summ["pkt_count"],
+                                      session_count=summ["session_count"],
+                                      decrypt_error_count=summ["decrypt_error_count"],
+                                      lost_packet_count=summ["lost_packet_count"],
+                                      init_status=init_status)
+
+    return app
+
+# ====================================================
+# Main Entry Point
+# ====================================================
+def main():
+    use_flask = "--flask" in sys.argv
+
+    # Start init process thread for pixelpilot_wfb_init.sh.
+    init_thread = threading.Thread(target=init_process_loop, daemon=True)
+    init_thread.start()
+
+    # Start data collection thread for pixelpilot_wfb.sh.
+    collector_thread = threading.Thread(target=data_collection_loop, daemon=True)
+    collector_thread.start()
+
+    try:
+        if use_flask:
+            app = create_flask_app()
+            print("Launching Flask Web UI on http://0.0.0.0:5000")
+            app.run(host="0.0.0.0", threaded=True, use_reloader=False)
+        else:
+            curses.wrapper(curses_mode)
+    except KeyboardInterrupt:
+        sys.exit(0)
+
+if __name__ == "__main__":
+    main()
