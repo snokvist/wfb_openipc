@@ -1,0 +1,13 @@
+[Unit]
+Description=PixelPilot TUI
+Wants=pixelpilot-wfb-init.service
+After=pixelpilot-wfb-init.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/pixel_tui.py
+Restart=on-failure
+RestartSec=5s
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=pixelpilot-tui
