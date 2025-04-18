@@ -1,47 +1,17 @@
-#!/bin/bash
-set -emb
+#!/usr/bin/env bash
+set -e
 
 export LC_ALL=C
 
-# Default values for wireless configuration
+# Default wireless settings
 DEFAULT_CHANNEL=165
 DEFAULT_BANDWIDTH="HT20"
 DEFAULT_REGION="US"
 DEFAULT_SERVER_IP="192.168.1.20"
 
-# Default mode is forwarder;
-MODE="forwarder"
-CLIENT_IP=""
-CLIENT_PORT=""
-
-# Parse optional arguments
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --mode)
-      MODE="$2"
-      shift 2
-      ;;
-    --client_ip)
-      CLIENT_IP="$2"
-      shift 2
-      ;;
-    --client_port)
-      CLIENT_PORT="$2"
-      shift 2
-      ;;
-    *)
-      # Stop parsing options when encountering non-option argument
-      break
-      ;;
-  esac
-done
-
-# Positional parameters for wireless configuration: CHANNEL, BANDWIDTH, REGION, SERVER_IP
+# Positional args: CHANNEL BANDWIDTH REGION SERVER_IP
 if [ $# -eq 4 ]; then
-  CHANNEL=$1
-  BANDWIDTH=$2
-  REGION=$3
-  SERVER_IP=$4
+  CHANNEL=$1; BANDWIDTH=$2; REGION=$3; SERVER_IP=$4
 else
   CHANNEL=$DEFAULT_CHANNEL
   BANDWIDTH=$DEFAULT_BANDWIDTH
@@ -49,47 +19,35 @@ else
   SERVER_IP=$DEFAULT_SERVER_IP
 fi
 
-echo "Using channel: $CHANNEL"
-echo "Using bandwidth: $BANDWIDTH"
-echo "Using region: $REGION"
-echo "Using server ip: $SERVER_IP"
-echo "Operating mode: $MODE"
-if [ "$MODE" != "forwarder" ]; then
-  echo "Client IP: $CLIENT_IP"
-  echo "Client Port: $CLIENT_PORT"
-fi
+echo "Channel:   $CHANNEL"
+echo "Bandwidth: $BANDWIDTH"
+echo "Region:    $REGION"
+echo "Server:    $SERVER_IP"
 
-# Set wireless region
+# Apply wireless region
 iw reg set "$REGION"
 
-# Read available WLAN interfaces from config file
-WFB_NICS=$(grep '^WFB_NICS=' /etc/default/wifibroadcast | cut -d'=' -f2 | tr -d '"')
-
-# Check if any interfaces were found
+# Load interfaces from config
+WFB_NICS=$(grep '^WFB_NICS=' /etc/default/wifibroadcast \
+           | cut -d'=' -f2 | tr -d '"')
 if [ -z "$WFB_NICS" ]; then
-  echo "No WLAN interfaces found in /etc/default/wifibroadcast."
+  echo "ERROR: no WFB_NICS found" >&2
   exit 1
 fi
-
-# Convert the string into an array
 read -r -a WLAN_INTERFACES <<< "$WFB_NICS"
 
-# Clean up function to kill background jobs on exit
-_cleanup()
-{
-  plist=$(jobs -p)
-  if [ -n "$plist" ]; then
-      kill -TERM $plist || true
-  fi
+# Cleanup on exit
+_cleanup(){
+  jobs -p | xargs --no-run-if-empty kill -TERM
   exit 1
 }
 trap _cleanup EXIT
 
-# Initialize each WLAN interface
+# Init each interface
 for wlan in "${WLAN_INTERFACES[@]}"; do
   echo "Initializing $wlan"
-
-  if which nmcli > /dev/null && ! nmcli device show "$wlan" | grep -q '(unmanaged)'; then
+  if command -v nmcli &>/dev/null && \
+     ! nmcli device show "$wlan" | grep -q '(unmanaged)'; then
     nmcli device set "$wlan" managed no
     sleep 1
   fi
@@ -100,38 +58,16 @@ for wlan in "${WLAN_INTERFACES[@]}"; do
   iw dev "$wlan" set channel "$CHANNEL" "$BANDWIDTH"
 done
 
-# Execute commands based on mode
-case "$MODE" in
-  forwarder)
-    # Original gs_video and gs_tunnel commands
-    wfb_rx -f -c "$SERVER_IP" -u 10000 -p 0 -i 7669206 -R 2097152 "${WLAN_INTERFACES[@]}" &
-    wfb_rx -f -c "$SERVER_IP" -u 10001 -p 32 -i 7669206 -R 2097152 "${WLAN_INTERFACES[@]}" &
-    wfb_tx -I 11001 -R 2097152 "${WLAN_INTERFACES[@]}" &
-    ;;
-  local)
-    # Check that required parameters are provided
-    if [ -z "$CLIENT_IP" ] || [ -z "$CLIENT_PORT" ]; then
-      echo "Error: In local mode, --client_ip and --client_port must be provided."
-      exit 1
-    fi
-    # Run the local mode command
-    wfb_rx -p 0 -c "$CLIENT_IP" -u "$CLIENT_PORT" -K /etc/gs.key -R 2097152 -l 1000 -i 7669206 "${WLAN_INTERFACES[@]}" &
-    ;;
-  aggregator)
-    # Check that required parameters are provided
-    if [ -z "$CLIENT_IP" ] || [ -z "$CLIENT_PORT" ]; then
-      echo "Error: In aggregator mode, --client_ip and --client_port must be provided."
-      exit 1
-    fi
-    # Run the aggregator commands
-    wfb_rx -a 10000 -p 0 -c "$CLIENT_IP" -u "$CLIENT_PORT" -K /etc/gs.key -R 2097152 -l 1000 -i 7669206 &
-    wfb_rx -f -c 127.0.0.1 -u 10000 -p 0 -i 7669206 -R 2097152 "${WLAN_INTERFACES[@]}" &
-    ;;
-  *)
-    echo "Invalid mode: $MODE. Accepted modes: forwarder, aggregator, local."
-    exit 1
-    ;;
-esac
+# --- gs_video ---
+wfb_rx -f -c "$SERVER_IP" -u 10000 -p 0  -i 7669206 -R 2097152 "${WLAN_INTERFACES[@]}" &
 
-echo "WFB-ng init done"
+# --- gs_mavlink ---
+wfb_rx -f -c "$SERVER_IP" -u 10001 -p 16 -i 7669206 -R 2097152 "${WLAN_INTERFACES[@]}" &
+wfb_tx          -I 11001          -R 2097152 "${WLAN_INTERFACES[@]}" &
+
+# --- gs_tunnel ---
+wfb_rx -f -c "$SERVER_IP" -u 10002 -p 32 -i 7669206 -R 2097152 "${WLAN_INTERFACES[@]}" &
+wfb_tx          -I 11002          -R 2097152 "${WLAN_INTERFACES[@]}" &
+
+echo "All forwarder instances started"
 wait -n
