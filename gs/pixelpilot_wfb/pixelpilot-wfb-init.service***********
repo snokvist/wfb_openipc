@@ -1,0 +1,13 @@
+[Unit]
+Description=PixelPilot WFB Initialization
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/pixelpilot_wfb_init.sh
+Restart=on-failure
+RestartSec=5s
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=pixelpilot-init
