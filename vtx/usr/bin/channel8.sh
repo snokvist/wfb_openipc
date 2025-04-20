@@ -20,30 +20,29 @@ elif [ "$1" -ge 1150 ] && [ "$1" -le 1250 ]; then
     curl -s 'http://localhost/api/v1/set?video0.bitrate=11333'
 elif [ "$1" -ge 1350 ] && [ "$1" -le 1450 ]; then
     # position 3 (around 1400)
-    channel=40                                                                                           
+    channel=48                                                                                           
     echo "CPU:&C &B temp:&T\nSetting channel: $channel ... please wait ... &L30 &G8 &F30" >/tmp/MSPOSD.msg
     sleep 1.2                                    
     iw dev wlan0 set channel $channel HT20
 elif [ "$1" -ge 1550 ] && [ "$1" -le 1650 ]; then
     # position 4 (around 1600)
-    channel=48                                                                                           
+    channel=100                                                                                           
     echo "CPU:&C &B temp:&T\nSetting channel: $channel ... please wait ... &L30 &G8 &F30" >/tmp/MSPOSD.msg
     sleep 1.2                                    
     iw dev wlan0 set channel $channel HT20
 elif [ "$1" -ge 1750 ] && [ "$1" -le 1850 ]; then
     # position 5 (around 1800)
-    channel=140                  
+    channel=153
     echo "CPU:&C &B temp:&T\nSetting channel: $channel ... please wait ... &L30 &G8 &F30" >/tmp/MSPOSD.msg
     sleep 1.2 
     iw dev wlan0 set channel $channel HT20
 elif [ "$1" -ge 1950 ] && [ "$1" -le 2050 ]; then
     # position 6 (around 2000)
-    channel=161
+    channel=165
     echo "CPU:&C &B temp:&T\nSetting channel: $channel ... please wait ... &L30 &G8 &F30" >/tmp/MSPOSD.msg
     sleep 1.2
     iw dev wlan0 set channel $channel HT20
 fi
-
 
 sleep 2
 echo "CPU:&C &B temp:&T\nChannel: $channel\nAttempted bitrate: $bitrate &L30 &G8 &F30" >/tmp/MSPOSD.msg
