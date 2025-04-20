@@ -16,7 +16,7 @@ MONITOR_TIMEOUT = 5     # seconds without a success → trigger scan
 SCAN_WINDOW     = 3     # seconds to watch for any success per channel
 PING_PERIOD_MS  = 333   # ms between pings in monitor/scan
 
-PERF_PACKET_COUNT = 300
+PERF_PACKET_COUNT = 50
 PERF_TIMEOUT_MS   = 250
 
 # SSH jump command template
