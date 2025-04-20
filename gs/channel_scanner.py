@@ -281,7 +281,27 @@ if __name__ == "__main__":
     print(f"Adapters: {adapters}")
 
     if args.perf:
+        # stop majestic remotely
+        print("Stopping majestic on remote host...")
+        cmd = SSH_JUMP_CMD + ["/etc/init.d/S95majestic stop"]
+        res = run_cmd(cmd, args.verbose)
+        if res.returncode != 0:
+            print("ERROR: failed to stop majestic:", res.stdout, file=sys.stderr)
+        else:
+            print("Remote majestic stopped.")
+
+        # run performance test
         perf_for_channel(adapters, args.verbose)
+
+        # restart majestic remotely
+        print("Restarting majestic on remote host...")
+        cmd = SSH_JUMP_CMD + ["/etc/init.d/S95majestic restart"]
+        res = run_cmd(cmd, args.verbose)
+        if res.returncode != 0:
+            print("ERROR: failed to restart majestic:", res.stdout, file=sys.stderr)
+        else:
+            print("Remote majestic restarted.")
+
         sys.exit(0)
 
     if args.perf_jump:
