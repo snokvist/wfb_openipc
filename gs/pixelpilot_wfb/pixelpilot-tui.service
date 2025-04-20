@@ -21,7 +21,3 @@ RestartSec=5s
 
 # when TUI stops for any reason, also stop openipc
 ExecStopPost=-/usr/bin/systemctl stop openipc.service
-
-StandardOutput=syslog
-StandardError=syslog
-SyslogIdentifier=pixelpilot-tui
