@@ -13,7 +13,7 @@ ExecStartPre=-/usr/bin/systemctl stop wfb-cluster-node.service wfb-cluster-manag
 ExecStartPre=-/usr/bin/systemctl restart openipc.service
 
 # 3) then launch the TUI
-ExecStart=/usr/bin/python3 /usr/bin/pixel_tui.py
+ExecStart=/usr/bin/python3 "/usr/bin/pixel_tui.py --flask"
 
 # if TUI crashes, restart it (and re-run ExecStartPre steps)
 Restart=on-failure
