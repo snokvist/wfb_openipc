@@ -189,7 +189,7 @@ def perf_for_channel(adapters, verbose=False):
             rate_kbps = recv * mtu * 8 / (duration_s * 1000)
             results.append({"mtu": mtu, "period": period,
                             "loss": loss, "rate": rate_kbps})
-    count_good = sum(1 for r in results if r["loss"] < 2)
+    count_good = sum(1 for r in results if r["loss"] < 6)
     percent_good = int(count_good / total_tests * 100)
     avg_loss = sum(r["loss"] for r in results) / len(results)
     avg_score = 100 - avg_loss
