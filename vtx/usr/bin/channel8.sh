@@ -1,6 +1,6 @@
 #!/bin/sh
 
-if [ "$1" -lt 1100 ]; then
+if [ "$1" -lt 999 ]; then
 
 elif [ "$1" -gt 1099 ] && [ "$1" -lt 1200 ]; then
 
