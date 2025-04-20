@@ -5,9 +5,23 @@ After=pixelpilot-wfb-init.service
 
 [Service]
 Type=simple
+
+# 1) ensure any old cluster services are shut down
+ExecStartPre=-/usr/bin/systemctl stop wfb-cluster-node.service wfb-cluster-manager@gs.service
+
+# 2) bring up (or restart) openipc
+ExecStartPre=-/usr/bin/systemctl restart openipc.service
+
+# 3) then launch the TUI
 ExecStart=/usr/bin/python3 /usr/local/bin/pixel_tui.py
+
+# if TUI crashes, restart it (and re-run ExecStartPre steps)
 Restart=on-failure
 RestartSec=5s
+
+# when TUI stops for any reason, also stop openipc
+ExecStopPost=-/usr/bin/systemctl stop openipc.service
+
 StandardOutput=syslog
 StandardError=syslog
 SyslogIdentifier=pixelpilot-tui
