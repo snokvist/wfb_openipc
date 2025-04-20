@@ -1,27 +1,20 @@
 #!/bin/sh
 
-if [ "$1" -lt 999 ]; then
-
-elif [ "$1" -gt 1099 ] && [ "$1" -lt 1200 ]; then
-
-elif [ "$1" -gt 1199 ] && [ "$1" -lt 1300 ]; then
-
-elif [ "$1" -gt 1299 ] && [ "$1" -lt 1400 ]; then
-
-elif [ "$1" -gt 1399 ] && [ "$1" -lt 1500 ]; then
-
-elif [ "$1" -gt 1499 ] && [ "$1" -lt 1600 ]; then
-
-elif [ "$1" -gt 1599 ] && [ "$1" -lt 1700 ]; then
-
-elif [ "$1" -gt 1699 ] && [ "$1" -lt 1800 ]; then
-
-elif [ "$1" -gt 1799 ] && [ "$1" -lt 1900 ]; then
-
-elif [ "$1" -gt 1899 ]; then
-
+if [ "$1" -ge 950 ]  && [ "$1" -le 1050 ]; then
+    # position 1 (around 1000)
+elif [ "$1" -ge 1150 ] && [ "$1" -le 1250 ]; then
+    # position 2 (around 1200)
+elif [ "$1" -ge 1350 ] && [ "$1" -le 1450 ]; then
+    # position 3 (around 1400)
+elif [ "$1" -ge 1550 ] && [ "$1" -le 1650 ]; then
+    # position 4 (around 1600)
+elif [ "$1" -ge 1750 ] && [ "$1" -le 1850 ]; then
+    # position 5 (around 1800)
+elif [ "$1" -ge 1950 ] && [ "$1" -le 2050 ]; then
+    # position 6 (around 2000)
 fi
 
 echo "CPU:&C &B temp:&T &L30 &G8 &F30" >/tmp/MSPOSD.msg
 
 exit 1
+**
