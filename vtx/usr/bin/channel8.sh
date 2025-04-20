@@ -12,6 +12,10 @@ elif [ "$1" -ge 1750 ] && [ "$1" -le 1850 ]; then
     # position 5 (around 1800)
 elif [ "$1" -ge 1950 ] && [ "$1" -le 2050 ]; then
     # position 6 (around 2000)
+    channel=165
+    wifibroadcast cli -s .wireless.channel $channel
+    wifibroadcast stop ;wifibroadcast stop; sleep 1;  wifibroadcast start
+    #sed -i "s/^wifi_channel =.*/wifi_channel = $channel/" /etc/wifibroadcast.cfg
 fi
 
 echo "CPU:&C &B temp:&T &L30 &G8 &F30" >/tmp/MSPOSD.msg
