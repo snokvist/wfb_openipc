@@ -32,7 +32,7 @@ elif [ "$1" -ge 1550 ] && [ "$1" -le 1650 ]; then
     iw dev wlan0 set channel $channel HT20
 elif [ "$1" -ge 1750 ] && [ "$1" -le 1850 ]; then
     # position 5 (around 1800)
-    channel=153
+    channel=124
     echo "CPU:&C &B temp:&T\nSetting channel: $channel ... please wait ... &L30 &G8 &F30" >/tmp/MSPOSD.msg
     sleep 1.2 
     iw dev wlan0 set channel $channel HT20
