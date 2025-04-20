@@ -10,7 +10,7 @@ from collections import deque
 # ──────────────── Configuration ────────────────
 
 TARGET_IP = "10.5.0.10"
-CHANNELS = [40, 44, 48, 140, 149, 153, 157, 161, 165]
+CHANNELS = [48,64,100,124,165]
 
 MONITOR_TIMEOUT = 5     # seconds without a success → trigger scan
 SCAN_WINDOW     = 3     # seconds to watch for any success per channel
