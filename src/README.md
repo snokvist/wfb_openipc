@@ -1,3 +1,6 @@
+socat -u UDP-RECV:8000 -
+nc -ulp 8000
+
 i2cdetect -y -r 1 
 
 For check out the IMU id. (68)
