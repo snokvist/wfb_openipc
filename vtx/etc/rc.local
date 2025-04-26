@@ -12,4 +12,8 @@
 # By default this script does nothing.
 echo "Custom Message... &L04 &F22 CPU:&C &B temp:&T\n Line 2 with more data &G8 &L30 &F30" >/tmp/MSPOSD.msg
 
+echo performance > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+echo 1200000 > /sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq
+echo 1200000 > /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq
+
 exit 0
