@@ -1,0 +1,10 @@
+#do something
+echo "performance" | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+killall rknn_server
+#backpack.py /dev/ttyS2 &
+sleep 5
+#scan.py --once &
+openwrt_follow.sh &
+iptables -t raw -I OUTPUT -d 127.0.0.1 -p udp --dport 5600 -j NOTRACK
+sysctl net.unix.max_dgram_qlen=4096
+plotter.py &
