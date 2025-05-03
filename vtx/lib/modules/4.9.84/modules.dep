@@ -32,6 +32,7 @@ sigmastar/mi_vif.ko: sigmastar/mi_sys.ko sigmastar/mhal.ko sigmastar/mi_common.k
 sigmastar/sensor_imx415_mipi.ko: sigmastar/mhal.ko
 sigmastar/mi_ai.ko: sigmastar/mi_sys.ko sigmastar/mhal.ko sigmastar/mi_common.ko
 extra/8812eu.ko: kernel/net/wireless/cfg80211.ko
+extra/8821cu.ko: kernel/net/wireless/cfg80211.ko
 sigmastar/mi_divp.ko: sigmastar/mi_rgn.ko sigmastar/mi_sys.ko sigmastar/mhal.ko sigmastar/mi_common.ko
 sigmastar/sensor_config.ko: sigmastar/mhal.ko
 sigmastar/sensor_imx347_mipi.ko: sigmastar/mhal.ko
